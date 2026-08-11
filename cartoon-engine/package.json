@@ -1,0 +1,30 @@
+{
+  "name": "cartoon-engine",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Учёт и происхождение ассетов мультфильма MOSSKIN",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "postinstall": "prisma generate",
+    "db:generate": "prisma generate",
+    "db:migrate": "prisma migrate dev",
+    "db:deploy": "prisma migrate deploy",
+    "db:studio": "prisma studio",
+    "cartoon": "tsx apps/cartoon/src/cli.ts",
+    "check:assets": "tsx scripts/check-assets.ts",
+    "test": "node --import tsx --test tests/media-store.test.ts tests/provenance.test.ts tests/asset-import.test.ts"
+  },
+  "dependencies": {
+    "@prisma/adapter-better-sqlite3": "^7.9.1",
+    "@prisma/client": "^7.9.1",
+    "better-sqlite3": "^13.0.3"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.15.3",
+    "dotenv": "^17.4.2",
+    "prisma": "^7.9.1",
+    "tsx": "^4.23.12",
+    "typescript": "^5.8.3"
+  }
+}

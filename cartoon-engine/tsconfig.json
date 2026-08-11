@@ -1,0 +1,29 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2023"],
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "types": ["node"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "forceConsistentCasingInFileNames": true,
+    "paths": {
+      "@core/*": ["./packages/core/src/*"]
+    }
+  },
+  "include": [
+    "packages/**/*.ts",
+    "apps/**/*.ts",
+    "scripts/**/*.ts",
+    "tests/**/*.ts",
+    "prisma.config.ts"
+  ],
+  "exclude": ["node_modules"]
+}
