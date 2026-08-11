@@ -63,3 +63,17 @@ export class InvariantError extends Error {
     this.name = 'InvariantError';
   }
 }
+
+/**
+ * Запись не удалась из-за одновременной работы второго процесса.
+ *
+ * Отдельный тип, чтобы наружу не вылезала необработанная ошибка Prisma.
+ * Человеку здесь нужно ровно одно действие — повторить запуск, — и сообщение
+ * должно говорить это, а не показывать код нарушенного индекса.
+ */
+export class ConcurrentImportError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ConcurrentImportError';
+  }
+}

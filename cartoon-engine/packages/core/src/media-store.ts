@@ -9,8 +9,8 @@
  * означает правку одной переменной окружения, а не переписывание базы.
  */
 import { createHash } from 'node:crypto';
-import { createReadStream } from 'node:fs';
-import { readdir, realpath, stat } from 'node:fs/promises';
+import { createReadStream, realpathSync } from 'node:fs';
+import { readFile, readdir, stat } from 'node:fs/promises';
 import path from 'node:path';
 import {
   MediaContentError,
@@ -277,10 +277,10 @@ export class MediaStore {
     return toPosix(back);
   }
 
-  private async rootRealPath(): Promise<string> {
+  private rootRealPath(): string {
     if (this.resolvedRoot === null) {
       try {
-        this.resolvedRoot = await realpath(this.root);
+        this.resolvedRoot = realpathSync.native(this.root);
       } catch {
         throw new NotConfiguredError(
           `Корень медиа не существует или недоступен: ${this.root}`
@@ -288,6 +288,44 @@ export class MediaStore {
       }
     }
     return this.resolvedRoot;
+  }
+
+  /**
+   * Канонический относительный путь: тот, под которым файл ЗАПИСАН на диске.
+   *
+   * Здесь именно `realpathSync.native`, и обе особенности вызова намеренны.
+   *
+   * Native — потому что на Windows только он возвращает подлинный регистр имён:
+   * обычный realpath отдаёт ту же строку, что ему дали, и `CHARACTERS/01-MOSSY`
+   * доехало бы до базы как отдельный путь. Файловая система регистр не
+   * различает, а уникальный индекс SQLite — различает, и без канонизации один
+   * физический файл получил бы две строки, обойдя всю проверку версий.
+   *
+   * Sync — потому что асинхронный API промисов native-варианта не предоставляет
+   * вовсе (`fsPromises.realpath.native` не существует). На фоне потокового
+   * чтения 26 МБ ради отпечатка один системный вызов ничего не стоит.
+   *
+   * Побочно снимается и вопрос символических ссылок: путь приводится к цели, а
+   * цель проверяется на принадлежность корню.
+   */
+  private canonicalRelative(absolutePath: string): string {
+    let real: string;
+    try {
+      real = realpathSync.native(absolutePath);
+    } catch {
+      throw new MediaNotFoundError(
+        `Файла нет: ${toPosix(this.toRelative(absolutePath))} (искали в ${absolutePath}).`
+      );
+    }
+
+    const rootReal = this.rootRealPath();
+    if (!samePathRoot(real, rootReal)) {
+      throw new MediaPathError(
+        `${absolutePath} — ссылка, ведущая за пределы корня медиа (${rootReal}).`
+      );
+    }
+
+    return toPosix(path.relative(rootReal, real));
   }
 
   /**
@@ -313,14 +351,9 @@ export class MediaStore {
       );
     }
 
-    // Символическая ссылка может логически лежать внутри корня, а указывать
-    // наружу. Логическая проверка в resolve() этого не видит.
-    const real = await realpath(absolutePath);
-    if (!samePathRoot(real, await this.rootRealPath())) {
-      throw new MediaPathError(
-        `${toPosix(relativePath)} — ссылка, ведущая за пределы корня медиа.`
-      );
-    }
+    // Канонический путь заодно проверяет, что ссылка не ведёт за корень:
+    // логическая проверка в resolve() символических ссылок не видит.
+    const canonical = this.canonicalRelative(absolutePath);
 
     const hash = createHash('sha256');
     let counted = 0;
@@ -352,12 +385,53 @@ export class MediaStore {
     const { mimeType, type } = sniff(header, path.basename(absolutePath));
 
     return {
-      relativePath: this.toRelative(absolutePath),
+      relativePath: canonical,
       absolutePath,
       sizeBytes: counted,
       sha256: hash.digest('hex'),
       mimeType,
       type
+    };
+  }
+
+  /**
+   * Текстовый файл внутри корня: содержимое, отпечаток, канонический путь.
+   *
+   * Отдельно от describe(), а не через него: у текста нет сигнатуры в первых
+   * байтах, и опознание по содержимому к нему неприменимо. Гарантии границ те
+   * же — читать за пределами корня нельзя и здесь.
+   *
+   * Предел размера не декоративный: без него опечатка в пути превратила бы
+   * попытку прочитать паспорт персонажа в загрузку 26-мегабайтного PNG в
+   * строку.
+   */
+  async readText(
+    relativePath: string,
+    maxBytes = 1_000_000
+  ): Promise<{ relativePath: string; text: string; sha256: string; sizeBytes: number }> {
+    const absolutePath = this.resolve(relativePath);
+
+    const stats = await stat(absolutePath).catch(() => null);
+    if (!stats || !stats.isFile()) {
+      throw new MediaNotFoundError(
+        `Файла нет: ${toPosix(relativePath)} (искали в ${absolutePath}).`
+      );
+    }
+    if (stats.size > maxBytes) {
+      throw new MediaContentError(
+        `${toPosix(relativePath)} — ${stats.size} байт, а как текст читается ` +
+          `не больше ${maxBytes}. Похоже, это не текстовый файл.`
+      );
+    }
+
+    const canonical = this.canonicalRelative(absolutePath);
+    const bytes = await readFile(absolutePath);
+
+    return {
+      relativePath: canonical,
+      text: bytes.toString('utf8'),
+      sha256: createHash('sha256').update(bytes).digest('hex'),
+      sizeBytes: bytes.length
     };
   }
 

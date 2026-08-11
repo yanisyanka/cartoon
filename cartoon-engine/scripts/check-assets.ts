@@ -1,13 +1,16 @@
 /**
- * Проверка фундамента ассетов: CE-TASK-001.
+ * Проверка реестра ассетов: CE-TASK-001 + CE-TASK-002.
  *
  * Сети не касается и денег не тратит. Работает с настоящей базой и настоящими
  * файлами — иначе она не проверяла бы то, ради чего затевалась.
  *
- * Главное здесь — девятая проверка. Отпечатки всех десяти эталонов снимаются
+ * Главное здесь — последняя проверка. Отпечатки всех десяти эталонов снимаются
  * ДО импорта и пересчитываются ПОСЛЕ. Совпадение — единственное машинное
  * доказательство того, что регистрация файлы не тронула. Все прочие обещания
  * («мы же только читаем») проверкой не являются.
+ *
+ * Персонажи должны быть импортированы заранее: эталон без персонажа не
+ * регистрируется. Порядок задан в npm run check.
  *
  *   npm run check:assets
  */
@@ -15,15 +18,22 @@ import 'dotenv/config';
 import {
   countAssets,
   getEngineDb,
-  importFiles,
-  listAssets,
+  listCurrentAssets,
   MediaStore,
+  needsAttention,
   type AssetView
 } from '@core/index';
+import { listCharacters } from '../apps/cartoon/src/repositories/characters';
+import {
+  importCharacterReferences,
+  REFERENCE_FILE,
+  REFERENCE_ROLE,
+  slugFromReferencePath
+} from '../apps/cartoon/src/services/reference-import';
+import { CHARACTERS_DIR } from '../apps/cartoon/src/services/character-import';
+import { isAssetRole } from '../apps/cartoon/src/domain/roles';
 
 const EXPECTED_REFERENCES = 10;
-const REFERENCE_FILE = 'ref_front.png';
-const CHARACTERS_DIR = 'characters';
 
 const passed: string[] = [];
 
@@ -34,7 +44,6 @@ function check(label: string, condition: boolean, detail?: string): void {
   passed.push(label);
 }
 
-/** Отпечаток файла в том виде, в каком его снимают до и после импорта. */
 type Fingerprint = { sha256: string; sizeBytes: number };
 
 async function fingerprintAll(
@@ -59,13 +68,22 @@ async function main(): Promise<void> {
   try {
     console.log(`Корень медиа: ${store.rootPath}\n`);
 
+    // --- предусловие ---------------------------------------------------------
+    const characters = await listCharacters(db);
+    check(
+      `персонажи импортированы (${EXPECTED_REFERENCES})`,
+      characters.length === EXPECTED_REFERENCES,
+      `в базе ${characters.length}. Сначала: npm run check:canon`
+    );
+    const characterById = new Map(characters.map((c) => [c.id, c]));
+    const characterBySlug = new Map(characters.map((c) => [c.slug, c]));
+
     // --- 1. файлы на месте ---------------------------------------------------
     const references = await store.find(REFERENCE_FILE, CHARACTERS_DIR);
-
     check(
       `найдено ровно ${EXPECTED_REFERENCES} файлов ${REFERENCE_FILE}`,
       references.length === EXPECTED_REFERENCES,
-      `найдено ${references.length}: ${references.join(', ')}`
+      `найдено ${references.length}`
     );
 
     // --- 2. отпечатки ДО импорта --------------------------------------------
@@ -75,41 +93,35 @@ async function main(): Promise<void> {
       'у каждого файла посчитан sha256',
       [...before.values()].every((f) => /^[0-9a-f]{64}$/.test(f.sha256))
     );
-
     check(
       'отпечатки всех файлов различны',
       new Set([...before.values()].map((f) => f.sha256)).size === references.length
     );
-
-    check(
-      'все размеры положительны',
-      [...before.values()].every((f) => f.sizeBytes > 0)
-    );
+    check('все размеры положительны', [...before.values()].every((f) => f.sizeBytes > 0));
 
     // --- 3. импорт -----------------------------------------------------------
     const countBefore = await countAssets(db);
-    const first = await importFiles({ store, db }, references);
+    const first = await importCharacterReferences({ store, db });
 
     check(
       'импорт не сообщил о конфликтах',
-      first.every((o) => o.status === 'registered' || o.status === 'already-registered'),
-      first
-        .filter((o) => o.status === 'content-conflict' || o.status === 'content-changed')
-        .map((o) => o.status)
-        .join(', ')
+      !first.some(needsAttention),
+      first.filter(needsAttention).map((o) => o.status).join(', ')
     );
 
+    const newRows = first.filter(
+      (o) => o.status === 'registered' || o.status === 'new-version'
+    ).length;
     const countAfterFirst = await countAssets(db);
-    const newlyRegistered = first.filter((o) => o.status === 'registered').length;
 
     check(
-      'число строк выросло ровно на число впервые увиденных файлов',
-      countAfterFirst === countBefore + newlyRegistered,
-      `было ${countBefore}, стало ${countAfterFirst}, впервые увидено ${newlyRegistered}`
+      'число строк выросло ровно на число новых записей',
+      countAfterFirst === countBefore + newRows,
+      `было ${countBefore}, стало ${countAfterFirst}, новых ${newRows}`
     );
 
     // --- 4. повторный импорт не создаёт дубликатов ---------------------------
-    const second = await importFiles({ store, db }, references);
+    const second = await importCharacterReferences({ store, db });
     const countAfterSecond = await countAssets(db);
 
     check(
@@ -117,18 +129,19 @@ async function main(): Promise<void> {
       countAfterSecond === countAfterFirst,
       `было ${countAfterFirst}, стало ${countAfterSecond}`
     );
-
     check(
       'повторный импорт опознал все файлы как уже зарегистрированные',
       second.every((o) => o.status === 'already-registered'),
       second.map((o) => o.status).join(', ')
     );
+    check(
+      'повторный импорт ничего не доклассифицировал',
+      second.every((o) => o.status === 'already-registered' && !o.classified)
+    );
 
     // --- 5. содержимое реестра ----------------------------------------------
-    const registered = await listAssets(db);
-    const byPath = new Map<string, AssetView>(
-      registered.map((asset) => [asset.relativePath, asset])
-    );
+    const current = await listCurrentAssets(db);
+    const byPath = new Map<string, AssetView>(current.map((a) => [a.relativePath, a]));
 
     for (const relativePath of references) {
       const expected = before.get(relativePath);
@@ -139,16 +152,12 @@ async function main(): Promise<void> {
 
       check(
         `sha256 в базе совпадает с файлом: ${relativePath}`,
-        asset.sha256 === expected.sha256,
-        `в базе ${asset.sha256}, у файла ${expected.sha256}`
+        asset.sha256 === expected.sha256
       );
-
       check(
         `размер в базе совпадает с файлом: ${relativePath}`,
-        asset.sizeBytes === expected.sizeBytes,
-        `в базе ${asset.sizeBytes}, у файла ${expected.sizeBytes}`
+        asset.sizeBytes === expected.sizeBytes
       );
-
       check(
         `relativePath корректен: ${relativePath}`,
         !asset.relativePath.startsWith('/') &&
@@ -156,42 +165,66 @@ async function main(): Promise<void> {
           !asset.relativePath.includes('\\') &&
           !asset.relativePath.includes('..')
       );
-
       check(
         `путь из базы разрешается в существующий файл: ${relativePath}`,
         await store.exists(asset.relativePath)
       );
-
       check(`тип определён как image: ${relativePath}`, asset.type === 'image');
-
       check(
         `mimeType определён по содержимому: ${relativePath}`,
         asset.mimeType === 'image/png'
       );
-
       check(
         `producedBy = import: ${relativePath}`,
         asset.provenance?.producedBy === 'import',
         `получено ${asset.provenance?.producedBy}`
       );
-
       check(
         `reproducibility = unknown: ${relativePath}`,
         asset.provenance?.reproducibility === 'unknown',
         `получено ${asset.provenance?.reproducibility}`
       );
+
+      // --- новое в CE-TASK-002 ---
+      check(
+        `role = ${REFERENCE_ROLE}: ${relativePath}`,
+        asset.role === REFERENCE_ROLE,
+        `получено ${asset.role}`
+      );
+      check(
+        `роль из известного словаря: ${relativePath}`,
+        asset.role !== null && isAssetRole(asset.role)
+      );
+      check(`version = 1: ${relativePath}`, asset.version === 1);
+      check(`первая версия ни на что не ссылается: ${relativePath}`, asset.supersedesId === null);
+
+      const slug = slugFromReferencePath(relativePath);
+      const expectedCharacter = characterBySlug.get(slug);
+      check(
+        `привязан к персонажу ${slug}: ${relativePath}`,
+        asset.characterId !== null && asset.characterId === expectedCharacter?.id,
+        `в базе characterId=${asset.characterId}, ожидался ${expectedCharacter?.id}`
+      );
+      check(
+        `персонаж существует и это ${slug}: ${relativePath}`,
+        asset.characterId !== null && characterById.get(asset.characterId)?.slug === slug
+      );
     }
 
+    check(
+      'у каждого персонажа ровно один текущий эталон',
+      characters.every(
+        (character) =>
+          current.filter(
+            (asset) => asset.characterId === character.id && asset.role === REFERENCE_ROLE
+          ).length === 1
+      )
+    );
+
     // --- 6. файлы не изменились ---------------------------------------------
-    //
-    // Ради этой проверки всё и затевалось: отпечатки пересчитываются заново, с
-    // диска, и сравниваются с теми, что были сняты до импорта.
     const after = await fingerprintAll(store, references);
 
-    check(
-      'после импорта на месте всё те же файлы',
-      after.size === before.size
-    );
+    check('после импорта на месте всё те же файлы', after.size === before.size);
 
     for (const [relativePath, expected] of before) {
       const actual = after.get(relativePath);
@@ -200,8 +233,7 @@ async function main(): Promise<void> {
         actual !== undefined &&
           actual.sha256 === expected.sha256 &&
           actual.sizeBytes === expected.sizeBytes,
-        `до: ${expected.sha256} (${expected.sizeBytes} б), ` +
-          `после: ${actual?.sha256} (${actual?.sizeBytes} б)`
+        `до: ${expected.sha256}, после: ${actual?.sha256}`
       );
     }
 

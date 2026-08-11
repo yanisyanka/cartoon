@@ -15,6 +15,14 @@ export type AssetView = {
   mimeType: string;
   sizeBytes: number;
   sha256: string;
+  /** Чем файл является. null — ещё не классифицирован. */
+  role: string | null;
+  /** Кто изображён. null — файл не привязан к персонажу. */
+  characterId: string | null;
+  /** Номер версии по этому пути, начиная с 1. */
+  version: number;
+  /** Предыдущая версия по тому же пути. null у первой. */
+  supersedesId: string | null;
   createdAt: string;
   provenance: {
     producedBy: ProducedBy;
@@ -23,25 +31,42 @@ export type AssetView = {
   } | null;
 };
 
+/** Классификация, которую вызывающий знает, а ядро — нет. */
+export type AssetClassification = {
+  role?: string;
+  characterId?: string;
+};
+
 /**
  * Чем закончилась попытка зарегистрировать файл.
  *
- * Четыре исхода вместо булева «получилось / нет», потому что человеку они
- * говорят разное и требуют разных действий.
+ * Пять исходов, и каждый требует от человека своего действия.
  *
- *   registered          файл увиден впервые;
- *   already-registered  тот же путь, те же байты — норма при повторном запуске;
- *   content-conflict    те же байты по НОВОМУ пути: в дереве завёлся дубликат;
- *   content-changed     тот же путь, ДРУГИЕ байты: файл переделали на диске.
+ *   registered             путь увиден впервые — версия 1;
+ *   new-version            тот же путь, другие байты — файл перерендерили;
+ *   already-registered     тот же путь, те же байты — норма при повторе;
+ *   content-conflict       те же байты по ДРУГОМУ пути — в дереве дубликат;
+ *   older-version-on-disk  на диске лежат байты УЖЕ УСТАРЕВШЕЙ версии.
  *
- * Последние два — не ошибки файловой системы, а факты о проекте, и молчать о
- * них нельзя. content-changed особенно: ассет versioning появится только с
- * полем supersedes на следующей фазе, а до тех пор единственный честный ответ —
- * отказаться и сказать, что именно разошлось.
+ * Последний исход выглядит экзотикой, но он прямое следствие версионирования:
+ * откатив неудачный перерендер, человек получает на диске байты, которые
+ * система числит устаревшими. Ответить «уже зарегистрировано» здесь означало
+ * бы скрыть расхождение между диском и реестром.
  */
 export type ImportOutcome =
   | { status: 'registered'; asset: AssetView }
-  | { status: 'already-registered'; asset: AssetView }
+  | {
+      status: 'new-version';
+      asset: AssetView;
+      /** Версия, которая была текущей до этой. Не изменена и не удалена. */
+      supersededAsset: AssetView;
+    }
+  | {
+      status: 'already-registered';
+      asset: AssetView;
+      /** true — у записи проставлены роль и/или персонаж, которых не было. */
+      classified: boolean;
+    }
   | {
       status: 'content-conflict';
       /** Ассет, под которым эти байты уже зарегистрированы. */
@@ -50,14 +75,19 @@ export type ImportOutcome =
       requestedPath: string;
     }
   | {
-      status: 'content-changed';
-      /** Ассет, записанный по этому пути раньше. */
+      status: 'older-version-on-disk';
+      /** Версия, чьи байты лежат на диске. */
       asset: AssetView;
-      /** Отпечаток, который лежит по этому пути сейчас. */
-      currentSha256: string;
+      /** Версия, которую реестр числит текущей. */
+      currentAsset: AssetView;
     };
 
-/** Зарегистрирован ли файл в результате этого вызова. */
-export function isNewlyRegistered(outcome: ImportOutcome): boolean {
-  return outcome.status === 'registered';
+/** Появилась ли в результате этого вызова новая строка. */
+export function createdNewRow(outcome: ImportOutcome): boolean {
+  return outcome.status === 'registered' || outcome.status === 'new-version';
+}
+
+/** Требует ли исход внимания человека. */
+export function needsAttention(outcome: ImportOutcome): boolean {
+  return outcome.status === 'content-conflict' || outcome.status === 'older-version-on-disk';
 }

@@ -127,6 +127,52 @@ test('exists: отсутствие файла — ответ, а не исклю
   assert.equal(await store.exists('characters/99-nobody/ref_front.png'), false);
 });
 
+/**
+ * Регистр пути канонизируется по диску.
+ *
+ * Проверка Windows-специфична, потому что специфична сама беда: файловая
+ * система регистр не различает, а уникальный индекс SQLite — различает. Без
+ * канонизации `CHARACTERS/01-MOSSY/ref_front.png` доехал бы до базы отдельной
+ * строкой, и один физический файл получил бы две записи, обойдя всю проверку
+ * версий. На Linux такого пути просто нет, и проверять там нечего.
+ */
+test(
+  'path: регистр приводится к тому, как файл записан на диске',
+  { skip: process.platform !== 'win32' },
+  async () => {
+    const canonical = await store.describe('characters/01-mossy/ref_front.png');
+    const shouting = await store.describe('CHARACTERS/01-MOSSY/ref_front.png');
+    const mixed = await store.describe('Characters/01-Mossy/ref_front.PNG');
+
+    assert.equal(canonical.relativePath, 'characters/01-mossy/ref_front.png');
+    assert.equal(shouting.relativePath, canonical.relativePath);
+    assert.equal(mixed.relativePath, canonical.relativePath);
+    assert.equal(shouting.sha256, canonical.sha256);
+  }
+);
+
+test('readText: паспорт читается вместе с отпечатком', async () => {
+  await sandbox.put('characters/01-mossy/character.md', Buffer.from('# 01 · Mossy\n', 'utf8'));
+
+  const file = await store.readText('characters/01-mossy/character.md');
+
+  assert.equal(file.relativePath, 'characters/01-mossy/character.md');
+  assert.match(file.text, /^# 01 · Mossy/);
+  assert.match(file.sha256, /^[0-9a-f]{64}$/);
+  assert.equal(file.sizeBytes, Buffer.byteLength('# 01 · Mossy\n', 'utf8'));
+});
+
+test('readText: слишком крупный файл текстом не читается', async () => {
+  await assert.rejects(
+    () => store.readText('characters/01-mossy/ref_front.png', 10),
+    MediaContentError
+  );
+});
+
+test('readText: границы корня действуют и здесь', async () => {
+  await assert.rejects(() => store.readText('../secrets.md'), MediaPathError);
+});
+
 test('config: относительный корень не принимается', () => {
   assert.throws(() => new MediaStore('./media'), NotConfiguredError);
 });

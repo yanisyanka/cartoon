@@ -1,23 +1,30 @@
 /**
  * Правила регистрации файла в реестре.
  *
- * Порядок шагов важен и повторяет порядок из соседнего проекта: сначала факты о
- * файле, потом поиск уже известного, и только потом запись. Ничего не пишется
- * до того, как файл прочитан целиком, — иначе оборванное чтение оставило бы
- * строку с отпечатком, которому нечего соответствовать.
+ * Порядок шагов важен: сначала факты о файле, потом поиск уже известного, и
+ * только потом запись. Ничего не пишется до того, как файл прочитан целиком, —
+ * иначе оборванное чтение оставило бы строку с отпечатком, которому нечего
+ * соответствовать.
  *
  * Файл здесь только читается. Ни перемещения, ни копирования, ни переименования
  * в этом модуле нет и быть не может: реестр описывает дерево, а не управляет им.
+ *
+ * Главное правило версионирования: СТАРАЯ СТРОКА НЕ ИЗМЕНЯЕТСЯ НИКОГДА. Новая
+ * версия ссылается на предыдущую, а не предыдущая на новую, поэтому появление
+ * версии физически не может тронуть прошлое. Старый файл на диске тоже никто не
+ * удаляет — система лишь фиксирует, что байты стали другими.
  */
-import type { ImportOutcome } from '../asset';
+import type { AssetClassification, ImportOutcome } from '../asset';
 import type { EngineDb } from '../db';
-import type { MediaStore } from '../media-store';
+import { ConcurrentImportError } from '../errors';
+import type { MediaFacts, MediaStore } from '../media-store';
 import { assertValidProvenance, importedProvenance } from '../provenance';
 import type { ProvenanceDraft } from '../provenance';
 import {
+  classifyAsset,
   createAssetWithProvenance,
-  findAssetByPath,
   findAssetBySha256,
+  findCurrentVersionByPath,
   isUniqueConstraintError
 } from '../repositories/assets';
 
@@ -26,49 +33,106 @@ export type ImportDeps = {
   db: EngineDb;
 };
 
+export type ImportOptions = {
+  provenance?: ProvenanceDraft;
+  classification?: AssetClassification;
+};
+
 /**
  * Зарегистрировать файл.
  *
- * Дедупликация идёт по sha256, а не по пути. Причина в том, что путь — это
- * место, а отпечаток — сам файл: переименованный эталон остаётся тем же
- * эталоном, а два разных рендера по одному пути одним файлом не становятся.
- *
- * Происхождение по умолчанию — импорт, то есть unknown. Передать другое можно,
- * но не любое: assertValidProvenance не пропустит импорт, объявленный
- * воспроизводимым.
+ * Дедупликация идёт по sha256, а не по пути. Путь — это место, отпечаток — сам
+ * файл: переименованный эталон остаётся тем же эталоном, а два разных рендера
+ * по одному пути одним файлом не становятся.
  */
 export async function importFile(
   deps: ImportDeps,
   relativePath: string,
-  provenance: ProvenanceDraft = importedProvenance()
+  options: ImportOptions = {}
 ): Promise<ImportOutcome> {
+  const provenance = options.provenance ?? importedProvenance();
+  const classification = options.classification ?? {};
   assertValidProvenance(provenance);
 
   const facts = await deps.store.describe(relativePath);
+  const current = await findCurrentVersionByPath(deps.db, facts.relativePath);
 
-  const byContent = await findAssetBySha256(deps.db, facts.sha256);
-  if (byContent) {
-    return byContent.relativePath === facts.relativePath
-      ? { status: 'already-registered', asset: byContent }
-      : {
-          status: 'content-conflict',
-          asset: byContent,
-          requestedPath: facts.relativePath
-        };
+  // --- путь ещё не знаком -----------------------------------------------------
+  if (!current) {
+    const byContent = await findAssetBySha256(deps.db, facts.sha256);
+    if (byContent) {
+      return {
+        status: 'content-conflict',
+        asset: byContent,
+        requestedPath: facts.relativePath
+      };
+    }
+
+    return create(deps, facts, provenance, classification, 1, null);
   }
 
-  // Отпечаток новый, но путь может быть занят: значит файл по этому пути
-  // переделали. Создавать вторую строку нельзя, и молча падать на уникальном
-  // индексе — тоже: человеку нужно знать, что именно разошлось.
-  const byPath = await findAssetByPath(deps.db, facts.relativePath);
-  if (byPath) {
+  // --- путь знаком, байты те же ----------------------------------------------
+  if (current.sha256 === facts.sha256) {
+    const { asset, changed } = await classifyAsset(deps.db, current.id, classification);
+    return { status: 'already-registered', asset, classified: changed };
+  }
+
+  // --- путь знаком, байты другие ---------------------------------------------
+  const byContent = await findAssetBySha256(deps.db, facts.sha256);
+
+  if (byContent) {
+    // Эти байты уже известны. Если под тем же путём — значит на диске лежит
+    // содержимое устаревшей версии: кто-то откатил перерендер.
+    if (byContent.relativePath === facts.relativePath) {
+      return { status: 'older-version-on-disk', asset: byContent, currentAsset: current };
+    }
     return {
-      status: 'content-changed',
-      asset: byPath,
-      currentSha256: facts.sha256
+      status: 'content-conflict',
+      asset: byContent,
+      requestedPath: facts.relativePath
     };
   }
 
+  // Роль и персонаж наследуются у предыдущей версии, если импорт не сказал
+  // иного: перерендеренный эталон Пуффа остаётся эталоном Пуффа, и заставлять
+  // человека проставлять это заново значило бы терять уже принятое решение.
+  const inherited: AssetClassification = {
+    ...(current.role !== null ? { role: current.role } : {}),
+    ...(current.characterId !== null ? { characterId: current.characterId } : {}),
+    ...classification
+  };
+
+  const created = await create(
+    deps,
+    facts,
+    provenance,
+    inherited,
+    current.version + 1,
+    current.id
+  );
+
+  return created.status === 'registered'
+    ? { status: 'new-version', asset: created.asset, supersededAsset: current }
+    : created;
+}
+
+/**
+ * Создание строки с разбором гонки.
+ *
+ * Между чтением и записью соседний процесс мог успеть всё что угодно, поэтому
+ * нарушение уникального индекса разбирается по существу, а не превращается в
+ * общий отказ. Разбор повторяет ту же логику, что и основной путь: иначе гонка
+ * возвращала бы исход, отличающийся от спокойного случая, и отличие всплыло бы
+ * в самый неудобный момент.
+ */
+async function create(
+  deps: ImportDeps,
+  facts: MediaFacts,
+  provenance: ProvenanceDraft,
+  classification: AssetClassification,
+  version: number,
+  supersedesId: string | null
+): Promise<ImportOutcome> {
   try {
     const asset = await createAssetWithProvenance(deps.db, {
       relativePath: facts.relativePath,
@@ -76,18 +140,36 @@ export async function importFile(
       mimeType: facts.mimeType,
       sizeBytes: facts.sizeBytes,
       sha256: facts.sha256,
+      role: classification.role ?? null,
+      characterId: classification.characterId ?? null,
+      version,
+      supersedesId,
       provenance
     });
 
     return { status: 'registered', asset };
   } catch (error) {
-    // Гонка двух одновременных запусков: строку успел создать соседний вызов.
-    // Данные должны остаться согласованными, а исход — правдивым.
-    if (isUniqueConstraintError(error)) {
-      const existing = await findAssetBySha256(deps.db, facts.sha256);
-      if (existing) return { status: 'already-registered', asset: existing };
+    if (!isUniqueConstraintError(error)) throw error;
+
+    // Нарушить могло любое из трёх ограничений: sha256, путь+версия или
+    // supersedesId. Первое разбираем по существу, остальные означают, что
+    // соседний процесс уже занял этот номер версии.
+    const byContent = await findAssetBySha256(deps.db, facts.sha256);
+    if (byContent) {
+      return byContent.relativePath === facts.relativePath
+        ? { status: 'already-registered', asset: byContent, classified: false }
+        : {
+            status: 'content-conflict',
+            asset: byContent,
+            requestedPath: facts.relativePath
+          };
     }
-    throw error;
+
+    throw new ConcurrentImportError(
+      `Не удалось записать ${facts.relativePath}: пока шёл импорт, версию ` +
+        `${version} по этому пути занял другой запуск. Повторите команду — ` +
+        'ничего не потеряно и не перезаписано.'
+    );
   }
 }
 
@@ -96,17 +178,21 @@ export async function importFile(
  *
  * Именно по очереди, а не параллельно: файлы по 26 МБ читаются целиком ради
  * отпечатка, и десяток одновременных потоков упёрся бы в диск, ничего не
- * ускорив. Отказ на одном файле останавливает всё — половина импортированного
- * набора хуже, чем ничего, потому что о ней потом надо помнить.
+ * ускорив.
  */
 export async function importFiles(
   deps: ImportDeps,
-  relativePaths: readonly string[],
-  provenance: ProvenanceDraft = importedProvenance()
+  targets: readonly { relativePath: string; classification?: AssetClassification }[],
+  provenance?: ProvenanceDraft
 ): Promise<ImportOutcome[]> {
   const outcomes: ImportOutcome[] = [];
-  for (const relativePath of relativePaths) {
-    outcomes.push(await importFile(deps, relativePath, provenance));
+  for (const target of targets) {
+    outcomes.push(
+      await importFile(deps, target.relativePath, {
+        ...(provenance ? { provenance } : {}),
+        ...(target.classification ? { classification: target.classification } : {})
+      })
+    );
   }
   return outcomes;
 }
