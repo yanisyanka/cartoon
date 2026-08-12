@@ -20,6 +20,13 @@ export type AssetView = {
   height: number | null;
   /** Чем файл является. null — ещё не классифицирован. */
   role: string | null;
+  /**
+   * Ракурс камеры. null — не задан; применимость выводится из role.
+   *
+   * Словарь значений живёт в приложении, как и словарь ролей: ядро хранит
+   * ракурс непрозрачной строкой.
+   */
+  cameraAngle: string | null;
   /** Кто изображён. null — файл не привязан к персонажу. */
   characterId: string | null;
   /** Номер версии по этому пути, начиная с 1. */
@@ -64,6 +71,7 @@ export type AssetInputView = {
 /** Классификация, которую вызывающий знает, а ядро — нет. */
 export type AssetClassification = {
   role?: string;
+  cameraAngle?: string;
   characterId?: string;
 };
 

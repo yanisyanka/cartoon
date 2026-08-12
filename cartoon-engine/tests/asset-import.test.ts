@@ -214,6 +214,45 @@ test('versioning: роль и персонаж наследуются новой
   assert.equal(outcome.asset.role, 'ref-front');
 });
 
+test('cameraAngle: эталон живёт без ракурса, и это не пробел', async () => {
+  // Применимость ракурса выводится из роли: у эталона, карточки и клипа его нет
+  // не потому, что забыли проставить, а потому, что понятие к ним не относится.
+  const outcome = await importFile({ store, db }, MOSSY, {
+    classification: { role: 'ref-front' }
+  });
+
+  assert.equal(outcome.asset.cameraAngle, null);
+});
+
+test('cameraAngle: наследуется новой версией так же, как роль', async () => {
+  await importFile({ store, db }, MOSSY, {
+    classification: { role: 'turnaround', cameraAngle: 'three-quarter-left' }
+  });
+
+  await sandbox.put(MOSSY, OTHER_PNG);
+  const outcome = await importFile({ store, db }, MOSSY);
+
+  assert.equal(outcome.status, 'new-version');
+  assert.equal(outcome.asset.role, 'turnaround');
+  assert.equal(outcome.asset.cameraAngle, 'three-quarter-left');
+});
+
+test('cameraAngle: проставленный ракурс импортом не переписывается', async () => {
+  await importFile({ store, db }, MOSSY, {
+    classification: { role: 'turnaround', cameraAngle: 'three-quarter-left' }
+  });
+
+  await assert.rejects(
+    importFile({ store, db }, MOSSY, {
+      classification: { cameraAngle: 'back' }
+    }),
+    InvariantError
+  );
+
+  const [asset] = await listAssets(db);
+  assert.equal(asset?.cameraAngle, 'three-quarter-left');
+});
+
 test('versioning: откат к прежним байтам виден как расхождение с диском', async () => {
   await importFile({ store, db }, MOSSY);
   await sandbox.put(MOSSY, OTHER_PNG);

@@ -50,6 +50,46 @@ export function requireAngle(angle: string): AngleSpec {
 }
 
 /**
+ * Словарь допустимых значений `Asset.cameraAngle`.
+ *
+ * Выводится из ANGLES, а не пишется вторым списком рядом: два списка одних и тех
+ * же значений неизбежно разойдутся, и разойдутся молча.
+ *
+ * Список открыт и расширяется правкой ANGLES, без миграции — ровно поэтому
+ * ракурс хранится строкой, а не перечислением. Расширять придётся: `CAST.md`
+ * числит несделанным `ref_side.png` («боковой ракурс… ни у кого»), а у Нокса и
+ * Эхо ракурс-подпись — полупрофиль и профиль. В текущий заход они не входят
+ * (`СТАТУС.md`: «не чистые профили — они в кадре почти не нужны»), поэтому и
+ * значений для них здесь пока нет: словарь описывает то, что движок умеет
+ * произвести, а не то, что когда-нибудь понадобится.
+ */
+export const CAMERA_ANGLES: readonly string[] = ANGLES.map((spec) => spec.angle);
+
+export function isCameraAngle(value: string): value is TurnaroundAngle {
+  return CAMERA_ANGLES.includes(value);
+}
+
+export function assertCameraAngle(value: string): asserts value is TurnaroundAngle {
+  if (!isCameraAngle(value)) {
+    throw new InvariantError(
+      `Неизвестный ракурс: ${value}. Допустимые: ${CAMERA_ANGLES.join(', ')}.`
+    );
+  }
+}
+
+/**
+ * Ракурс по фразе камеры — обратный разбор.
+ *
+ * Нужен там, где ракурс приходится ВОССТАНАВЛИВАТЬ из записи о прошлом:
+ * в параметрах запуска сохранена фраза, а не название ракурса. Прямой путь
+ * (название → фраза) остаётся единственным при генерации; этот — только для
+ * сверки уже записанного.
+ */
+export function findAngleByCameraPhrase(phrase: string): AngleSpec | null {
+  return ANGLES.find((spec) => spec.cameraPhrase === phrase) ?? null;
+}
+
+/**
  * Ограничения канона, добавляемые к каждому промпту ракурса.
  *
  * Каждая строка — не украшение, а закрытие известного отказа:

@@ -212,6 +212,7 @@ async function commandCharactersShow(slug: string | undefined): Promise<number> 
       console.log(`\nAsset:            ${asset.role ?? '(без роли)'}`);
       console.log(`path:             ${asset.relativePath}`);
       console.log(`sha256:           ${asset.sha256}`);
+      if (asset.cameraAngle) console.log(`ракурс:           ${asset.cameraAngle}`);
       console.log(`version:          ${asset.version}`);
       console.log(`reproducibility:  ${asset.provenance?.reproducibility ?? '—'}`);
     }
@@ -330,9 +331,10 @@ async function commandAssetsImport(args: string[]): Promise<number> {
 
 function printAsset(asset: AssetView, characterName: string | undefined): void {
   const frame = asset.width && asset.height ? ` · ${asset.width}×${asset.height}` : '';
+  const angle = asset.cameraAngle ? ` (${asset.cameraAngle})` : '';
   console.log(`${asset.relativePath}  v${asset.version}`);
   console.log(
-    `    ${asset.role ?? '(без роли)'} · ${characterName ?? '(без персонажа)'} · ` +
+    `    ${asset.role ?? '(без роли)'}${angle} · ${characterName ?? '(без персонажа)'} · ` +
       `${asset.mimeType}${frame} · ${formatBytes(asset.sizeBytes)} байт`
   );
   console.log(`    sha256 ${asset.sha256}`);
@@ -544,6 +546,7 @@ async function commandAssetsProvenance(relativePath: string | undefined): Promis
     console.log(`${asset.relativePath}  v${asset.version}`);
     console.log(`  sha256            ${asset.sha256}`);
     console.log(`  роль              ${asset.role ?? '—'}`);
+    console.log(`  ракурс            ${asset.cameraAngle ?? '—'}`);
     console.log(`  произведён        ${p?.producedBy ?? '—'}`);
     console.log(`  воспроизводимость ${p?.reproducibility ?? '—'}`);
     if (p?.note) console.log(`     почему         ${p.note}`);

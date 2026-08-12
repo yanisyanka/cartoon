@@ -19,7 +19,12 @@ import {
   type AssetView
 } from '@core/index';
 import { isAssetRole } from '../apps/cartoon/src/domain/roles';
-import { ANGLES } from '../apps/cartoon/src/domain/turnaround';
+import {
+  ANGLES,
+  CAMERA_ANGLES,
+  findAngleByCameraPhrase,
+  isCameraAngle
+} from '../apps/cartoon/src/domain/turnaround';
 import {
   TURNAROUND_LORA_KEYS,
   TURNAROUND_MODEL_KEY,
@@ -75,6 +80,15 @@ async function main(): Promise<void> {
     check(
       'ни в одной фразе камеры нет кириллицы',
       ANGLES.every((angle) => !/[а-яё]/i.test(angle.cameraPhrase))
+    );
+    check(
+      'словарь ракурсов выведен из ANGLES, а не написан вторым списком',
+      CAMERA_ANGLES.length === ANGLES.length &&
+        ANGLES.every((angle) => isCameraAngle(angle.angle))
+    );
+    check(
+      'фразы камеры различимы: по фразе восстанавливается ровно её ракурс',
+      ANGLES.every((angle) => findAngleByCameraPhrase(angle.cameraPhrase)?.angle === angle.angle)
     );
 
     // --- сгенерированные ассеты ---------------------------------------------
@@ -174,6 +188,62 @@ async function main(): Promise<void> {
         referenceAsset !== undefined && referenceAsset.sha256 !== asset.sha256
       );
     }
+
+    // --- ракурсы различимы ---------------------------------------------------
+    //
+    // До появления cameraAngle ракурс жил в имени файла, и вопрос «текущий
+    // turnaround персонажа» отвечался тем, чей путь меньше по алфавиту. Здесь
+    // проверяется, что ракурс стал фактом строки и что три источника — поле,
+    // фраза камеры и путь — говорят одно и то же.
+    const turnarounds = assets.filter((asset) => asset.role === TURNAROUND_ROLE);
+
+    for (const asset of turnarounds) {
+      const at = asset.relativePath;
+      const angle = asset.cameraAngle;
+
+      check(`ракурс проставлен: ${at}`, angle !== null, 'npm run backfill:camera-angle');
+      check(
+        `ракурс из словаря: ${at}`,
+        angle !== null && isCameraAngle(angle),
+        `получено ${angle}, допустимые: ${CAMERA_ANGLES.join(', ')}`
+      );
+
+      const phrase = (() => {
+        try {
+          const parsed = JSON.parse(asset.provenance?.parameters ?? '{}') as {
+            cameraPhrase?: unknown;
+          };
+          return typeof parsed.cameraPhrase === 'string' ? parsed.cameraPhrase : null;
+        } catch {
+          return null;
+        }
+      })();
+
+      check(
+        `ракурс согласован с фразой камеры: ${at}`,
+        phrase === null || findAngleByCameraPhrase(phrase)?.angle === angle,
+        `поле ${angle}, а фраза ${phrase} означает ${findAngleByCameraPhrase(phrase ?? '')?.angle}`
+      );
+      check(
+        `ракурс согласован с именем файла: ${at}`,
+        angle !== null && (at.split('/').pop() ?? '').startsWith(`${angle}.`)
+      );
+    }
+
+    check(
+      'разные ракурсы не являются версиями друг друга',
+      turnarounds.every((asset) => asset.supersedesId === null),
+      'у ракурса появился supersedesId — версия и дубль перепутаны'
+    );
+
+    // Ролям без ракурса пустое значение не запрещено: применимость выводится из
+    // роли, и у клипа ракурса нет, потому что это клип.
+    check(
+      'эталоны, карточки и клипы живут без ракурса',
+      assets
+        .filter((asset) => ['ref-front', 'card', 'clip'].includes(asset.role ?? ''))
+        .every((asset) => asset.cameraAngle === null)
+    );
 
     // --- импортированные не притворяются произведёнными ----------------------
     const imported = assets.filter((asset) => asset.provenance?.producedBy === 'import');

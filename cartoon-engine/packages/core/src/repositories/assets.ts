@@ -32,6 +32,7 @@ type AssetRow = {
   width: number | null;
   height: number | null;
   role: string | null;
+  cameraAngle: string | null;
   characterId: string | null;
   version: number;
   supersedesId: string | null;
@@ -79,6 +80,7 @@ export function toAssetView(row: AssetRow): AssetView {
     width: row.width,
     height: row.height,
     role: row.role,
+    cameraAngle: row.cameraAngle,
     characterId: row.characterId,
     version: row.version,
     supersedesId: row.supersedesId,
@@ -163,6 +165,8 @@ export type CreateAssetInput = {
   width: number | null;
   height: number | null;
   role: string | null;
+  /** Ракурс. null у всего, к чему понятие не применимо или ещё не задано. */
+  cameraAngle: string | null;
   characterId: string | null;
   version: number;
   supersedesId: string | null;
@@ -192,6 +196,7 @@ export async function createAssetWithProvenance(
       width: input.width,
       height: input.height,
       role: input.role,
+      cameraAngle: input.cameraAngle,
       characterId: input.characterId,
       version: input.version,
       supersedesId: input.supersedesId,
@@ -246,7 +251,7 @@ export async function createAssetWithProvenance(
 export async function classifyAsset(
   db: EngineDb,
   assetId: string,
-  classification: { role?: string; characterId?: string }
+  classification: { role?: string; cameraAngle?: string; characterId?: string }
 ): Promise<{ asset: AssetView; changed: boolean }> {
   const existing = await db.asset.findUnique({
     where: { id: assetId },
@@ -257,7 +262,7 @@ export async function classifyAsset(
     throw new InvariantError(`Ассет ${assetId} исчез между чтением и записью.`);
   }
 
-  const patch: { role?: string; characterId?: string } = {};
+  const patch: { role?: string; cameraAngle?: string; characterId?: string } = {};
 
   if (classification.role !== undefined && existing.role !== classification.role) {
     if (existing.role !== null) {
@@ -268,6 +273,23 @@ export async function classifyAsset(
       );
     }
     patch.role = classification.role;
+  }
+
+  // Ракурс — по тому же правилу, что и роль. Проставить незаданный можно,
+  // переписать заданный — нет: это утверждение о том, что изображено, и менять
+  // его вправе только человек отдельным действием.
+  if (
+    classification.cameraAngle !== undefined &&
+    existing.cameraAngle !== classification.cameraAngle
+  ) {
+    if (existing.cameraAngle !== null) {
+      throw new InvariantError(
+        `У ассета ${existing.relativePath} уже проставлен ракурс ` +
+          `${existing.cameraAngle}, а импорт предлагает ${classification.cameraAngle}. ` +
+          'Смена ракурса — отдельное решение.'
+      );
+    }
+    patch.cameraAngle = classification.cameraAngle;
   }
 
   if (
@@ -319,7 +341,16 @@ export async function countAssets(db: EngineDb): Promise<number> {
   return db.asset.count();
 }
 
-/** Текущая версия ассета данной роли у данного персонажа. */
+/**
+ * Текущая версия ассета данной роли у данного персонажа.
+ *
+ * Годится ТОЛЬКО для ролей, у которых один текущий ассет на персонажа:
+ * ref-front, card, clip. Для turnaround не годится и вызываться не должна —
+ * ракурсов у персонажа три, и функция вернёт тот, чей путь меньше по алфавиту,
+ * то есть затылок. Ответ был бы не спорным, а неверным.
+ *
+ * Для ракурсов есть findCurrentAssetByCharacterRoleAndAngle.
+ */
 export async function findCurrentAssetByCharacterAndRole(
   db: EngineDb,
   characterId: string,
@@ -331,6 +362,53 @@ export async function findCurrentAssetByCharacterAndRole(
     include: WITH_PROVENANCE
   });
   return row ? toAssetView(row) : null;
+}
+
+/**
+ * Ассет конкретного ракурса у персонажа.
+ *
+ * Тройка (персонаж, роль, ракурс) — тот ключ, по которому вопрос «есть ли у
+ * Нокса затылок» имеет однозначный ответ. Разные ракурсы друг другу не версии и
+ * друг друга не заслоняют: запрос про ¾ слева не может вернуть затылок, сколько
+ * бы ракурсов ни появилось.
+ *
+ * О дублях. Два запуска одного ракурса с разными seed дают два файла, и оба
+ * законны — выбирают между ними глазами. Какой из них ПРИНЯТ, модель пока не
+ * выражает: принятие — решение человека, и придумывать его сортировкой нельзя.
+ * Пока дубль один, функция возвращает именно его. Когда дублей станет больше,
+ * она вернёт последний по времени — не потому, что он лучше, а потому, что
+ * какой-то ответ нужен; за полным списком есть listAssetsByCharacterRoleAndAngle.
+ */
+export async function findCurrentAssetByCharacterRoleAndAngle(
+  db: EngineDb,
+  characterId: string,
+  role: string,
+  cameraAngle: string
+): Promise<AssetView | null> {
+  const row = await db.asset.findFirst({
+    where: { characterId, role, cameraAngle },
+    // relativePath вторым ключом — не ради смысла, а ради определённости:
+    // два дубля могут лечь в одну миллисекунду, и порядок обязан быть
+    // воспроизводимым, а не зависеть от того, как лягут строки.
+    orderBy: [{ createdAt: 'desc' }, { relativePath: 'desc' }],
+    include: WITH_PROVENANCE
+  });
+  return row ? toAssetView(row) : null;
+}
+
+/** Все дубли одного ракурса, от раннего к позднему. */
+export async function listAssetsByCharacterRoleAndAngle(
+  db: EngineDb,
+  characterId: string,
+  role: string,
+  cameraAngle: string
+): Promise<AssetView[]> {
+  const rows = await db.asset.findMany({
+    where: { characterId, role, cameraAngle },
+    orderBy: [{ createdAt: 'asc' }, { relativePath: 'asc' }],
+    include: WITH_PROVENANCE
+  });
+  return rows.map(toAssetView);
 }
 
 /** Все ассеты роли у персонажа — ракурсов бывает несколько. */

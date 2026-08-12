@@ -101,6 +101,7 @@ export async function importFile(
   // человека проставлять это заново значило бы терять уже принятое решение.
   const inherited: AssetClassification = {
     ...(current.role !== null ? { role: current.role } : {}),
+    ...(current.cameraAngle !== null ? { cameraAngle: current.cameraAngle } : {}),
     ...(current.characterId !== null ? { characterId: current.characterId } : {}),
     ...classification
   };
@@ -174,6 +175,7 @@ async function create(
       width: facts.width,
       height: facts.height,
       role: classification.role ?? null,
+      cameraAngle: classification.cameraAngle ?? null,
       characterId: classification.characterId ?? null,
       version,
       supersedesId,

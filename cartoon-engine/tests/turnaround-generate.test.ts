@@ -17,6 +17,8 @@ import { MediaWriteError, InvariantError } from '../packages/core/src/errors';
 import { importFile } from '../packages/core/src/services/asset-import';
 import {
   countAssets,
+  findCurrentAssetByCharacterAndRole,
+  findCurrentAssetByCharacterRoleAndAngle,
   listAssets
 } from '../packages/core/src/repositories/assets';
 import { ProviderNotReadyError, ProviderRunFailedError } from '../packages/core/src/provider';
@@ -32,6 +34,7 @@ import type {
   RunState
 } from '../packages/core/src/provider';
 import { upsertCharacter } from '../apps/cartoon/src/repositories/characters';
+import { findAngleByCameraPhrase } from '../apps/cartoon/src/domain/turnaround';
 import { generateTurnaround } from '../apps/cartoon/src/services/turnaround-generate';
 import { createSandbox, PNG_1X1, type Sandbox } from './fixtures';
 
@@ -308,6 +311,118 @@ test('reproducibility: seedStable=false закрывает путь к determini
   assert.equal(computeReproducibility({ ...complete, seedStable: false }), 'stochastic');
   assert.equal(computeReproducibility({ ...complete, seedStable: null }), 'stochastic');
   assert.equal(computeReproducibility({ ...complete, seedStable: true }), 'deterministic');
+});
+
+// --- ракурс как факт строки ---------------------------------------------------
+//
+// До появления cameraAngle ракурс жил только в имени файла и в свободном JSON
+// параметров. Пока ракурс был один, разницы не было; проверки ниже описывают
+// ровно то, что ломалось на трёх.
+
+/** Разные байты на каждый ракурс: sha256 уникален глобально. */
+function bytesFor(angle: string): Buffer {
+  return Buffer.concat([PNG_1X1, Buffer.from(angle, 'utf8')]);
+}
+
+async function generateAll(): Promise<void> {
+  for (const angle of ['three-quarter-left', 'three-quarter-right', 'back'] as const) {
+    await generateTurnaround(
+      { store, db, provider: new StubProvider({ bytes: bytesFor(angle) }) },
+      { ...RUN, angle }
+    );
+  }
+}
+
+test('cameraAngle: ракурс записан в строку, а не только в имя файла', async () => {
+  const provider = new StubProvider();
+  const result = await generateTurnaround({ store, db, provider }, RUN);
+
+  assert.equal(result.asset.cameraAngle, 'three-quarter-left');
+});
+
+test('cameraAngle: три ракурса — три независимых ассета, а не три версии', async () => {
+  await generateAll();
+
+  const turnarounds = (await listAssets(db)).filter((asset) => asset.role === 'turnaround');
+  assert.equal(turnarounds.length, 3);
+
+  assert.deepEqual(
+    turnarounds.map((asset) => asset.cameraAngle).sort(),
+    ['back', 'three-quarter-left', 'three-quarter-right']
+  );
+
+  // Главное утверждение задачи: ракурсы друг другу не версии.
+  for (const asset of turnarounds) {
+    assert.equal(asset.version, 1, asset.relativePath);
+    assert.equal(asset.supersedesId, null, asset.relativePath);
+  }
+
+  // И это разные файлы, а не один под тремя именами.
+  assert.equal(new Set(turnarounds.map((a) => a.sha256)).size, 3);
+  assert.equal(new Set(turnarounds.map((a) => a.relativePath)).size, 3);
+});
+
+test('поиск: запрос ракурса возвращает его, а не соседний по алфавиту', async () => {
+  await generateAll();
+
+  for (const angle of ['three-quarter-left', 'three-quarter-right', 'back']) {
+    const found = await findCurrentAssetByCharacterRoleAndAngle(
+      db,
+      characterId,
+      'turnaround',
+      angle
+    );
+    assert.equal(found?.cameraAngle, angle);
+    assert.ok(found?.relativePath.includes(`/${angle}.s`), found?.relativePath);
+  }
+});
+
+test('поиск: старая функция на роли с ракурсами отвечает первым по алфавиту', async () => {
+  await generateAll();
+
+  // Не регрессия, а причина, по которой понадобилась вторая функция:
+  // findFirst с orderBy relativePath asc вернёт 'back…' раньше 'three-quarter…',
+  // потому что 'b' меньше 't'. Ответ не спорный, а неверный — и именно поэтому
+  // для turnaround эта функция не используется.
+  const byRole = await findCurrentAssetByCharacterAndRole(db, characterId, 'turnaround');
+  assert.equal(byRole?.cameraAngle, 'back');
+
+  // На ref-front, где текущий ассет один, она по-прежнему права.
+  const reference = await findCurrentAssetByCharacterAndRole(db, characterId, 'ref-front');
+  assert.equal(reference?.id, referenceId);
+  assert.equal(reference?.cameraAngle, null);
+});
+
+test('cameraAngle: неизвестный ракурс отвергается до обращения к провайдеру', async () => {
+  const provider = new StubProvider();
+  const before = await countAssets(db);
+
+  await assert.rejects(
+    generateTurnaround(
+      { store, db, provider },
+      { ...RUN, angle: 'profile-left' as never }
+    ),
+    InvariantError
+  );
+
+  assert.equal(provider.estimateCalls, 0, 'провайдера не должны были трогать');
+  assert.equal(await countAssets(db), before);
+});
+
+test('cameraAngle: поле и фраза камеры говорят одно и то же', async () => {
+  await generateAll();
+
+  const turnarounds = (await listAssets(db)).filter((asset) => asset.role === 'turnaround');
+  for (const asset of turnarounds) {
+    const parameters = JSON.parse(asset.provenance?.parameters ?? '{}') as {
+      cameraPhrase?: string;
+    };
+    assert.equal(
+      findAngleByCameraPhrase(parameters.cameraPhrase ?? '')?.angle,
+      asset.cameraAngle,
+      asset.relativePath
+    );
+  }
 });
 
 test('registry: у моделей Qwen устойчивость seed измерена и равна false', () => {
