@@ -34,6 +34,8 @@ export type Sandbox = {
   root: string;
   /** Записать файл по пути относительно корня песочницы. */
   put(relativePath: string, bytes: Buffer): Promise<string>;
+  /** Убрать файл или каталог песочницы. Только внутри неё. */
+  remove(relativePath: string): Promise<void>;
   dispose(): Promise<void>;
 };
 
@@ -47,6 +49,11 @@ export async function createSandbox(): Promise<Sandbox> {
       await mkdir(path.dirname(absolute), { recursive: true });
       await writeFile(absolute, bytes);
       return absolute;
+    },
+    async remove(relativePath) {
+      // Только внутри песочницы: путь собирается от её корня, наружу выйти
+      // нечем. Настоящее дерево проекта этим кодом не достижимо.
+      await rm(path.join(root, relativePath), { recursive: true, force: true });
     },
     async dispose() {
       await rm(root, { recursive: true, force: true });

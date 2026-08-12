@@ -1,0 +1,94 @@
+/**
+ * Ракурсы персонажа: как о них просят модель и куда кладут результат.
+ *
+ * Фразы камеры — на китайском, и это не экзотика: LoRA
+ * `Qwen-Edit-2509-Multiple-angles` обучена именно на них, а перевод на
+ * английский поворота не даёт. Формулировки взяты из `СТАТУС.md`, раздел
+ * «Следующий шаг — ракурсы», дословно.
+ *
+ * Кириллицы в промпте нет и быть не может: модели её перевирают, и правило
+ * `no-cyrillic-in-generation` это прямо запрещает.
+ */
+import { InvariantError } from '@core/index';
+
+export type TurnaroundAngle = 'three-quarter-left' | 'three-quarter-right' | 'back';
+
+export type AngleSpec = {
+  angle: TurnaroundAngle;
+  /** Фраза камеры, которую понимает LoRA. */
+  cameraPhrase: string;
+  /** Как ракурс называется человеку. */
+  label: string;
+};
+
+export const ANGLES: readonly AngleSpec[] = [
+  {
+    angle: 'three-quarter-left',
+    cameraPhrase: '将镜头向左旋转45度',
+    label: '¾ слева'
+  },
+  {
+    angle: 'three-quarter-right',
+    cameraPhrase: '将镜头向右旋转45度',
+    label: '¾ справа'
+  },
+  {
+    angle: 'back',
+    cameraPhrase: '将镜头旋转180度，从背后拍摄',
+    label: 'затылок'
+  }
+];
+
+export function requireAngle(angle: string): AngleSpec {
+  const spec = ANGLES.find((candidate) => candidate.angle === angle);
+  if (!spec) {
+    throw new InvariantError(
+      `Неизвестный ракурс: ${angle}. Известные: ${ANGLES.map((a) => a.angle).join(', ')}.`
+    );
+  }
+  return spec;
+}
+
+/**
+ * Ограничения канона, добавляемые к каждому промпту ракурса.
+ *
+ * Каждая строка — не украшение, а закрытие известного отказа:
+ *
+ *   1-2  Qwen отъезжает камерой и превращает плотный кадр в средний план
+ *        (СТАТУС.md, «Грабли»). Поэтому кадрирование описывается явно.
+ *   3    Канон лица: радужка с кольцом, зрачок, блик, брови-запятые
+ *        (CAST.md, п.5). Формулировка «pure black eyes with no iris»
+ *        запрещена и здесь не используется.
+ *   4    Рта нет (CAST.md, п.5).
+ *   5    Кириллицу и любой текст в кадр не генерировать (CAST.md, п.6).
+ *   6    Один персонаж: лишние фигуры ломают силуэтный тест.
+ */
+export const CANON_GUARDS: readonly string[] = [
+  'Keep the full figure inside the frame, head and feet not cropped.',
+  'Keep the same close framing and the same plain white background; do not zoom out to a medium shot.',
+  'Keep the eyes exactly as in the reference: huge and round, with a warm iris ring, a dark pupil and a bright highlight, and two tiny dark comma eyebrows.',
+  'The character has no mouth; do not add one.',
+  'No text, no letters, no numbers, no watermark anywhere in the image.',
+  'Exactly one character in the frame, no extra figures.'
+];
+
+/**
+ * Собрать промпт ракурса.
+ *
+ * Строка персонажа вставляется ДОСЛОВНО, вместе с её разметкой: в паспорте
+ * прямо написано «копировать дословно», и любая чистка увела бы генерацию от
+ * эталона. Правится только то, что относится к камере и к рамкам канона.
+ */
+export function buildTurnaroundPrompt(promptLine: string, spec: AngleSpec): string {
+  return [
+    spec.cameraPhrase,
+    'Keep the same character with the same design, colours, proportions and silhouette:',
+    promptLine,
+    ...CANON_GUARDS
+  ].join(' ');
+}
+
+/** Путь результата. Seed в имени: два дубля одного ракурса не столкнутся. */
+export function turnaroundPath(slug: string, angle: TurnaroundAngle, seed: string): string {
+  return `characters/${slug}/turnaround/${angle}.s${seed}.png`;
+}

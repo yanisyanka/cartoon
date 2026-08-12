@@ -13,8 +13,9 @@
     "cartoon": "tsx apps/cartoon/src/cli.ts",
     "check:canon": "tsx scripts/check-canon.ts",
     "check:assets": "tsx scripts/check-assets.ts",
-    "check": "npm run check:canon && npm run check:assets",
-    "test": "node --import tsx --test tests/media-store.test.ts tests/provenance.test.ts tests/character-md.test.ts tests/character-assets.test.ts tests/asset-import.test.ts"
+    "check": "npm run check:canon && npm run check:assets && npm run check:provider",
+    "test": "node --import tsx --test tests/media-store.test.ts tests/provenance.test.ts tests/character-md.test.ts tests/character-assets.test.ts tests/asset-import.test.ts tests/provider-comfyui.test.ts tests/turnaround-generate.test.ts",
+    "check:provider": "tsx scripts/check-provider.ts"
   },
   "dependencies": {
     "@prisma/adapter-better-sqlite3": "^7.9.1",

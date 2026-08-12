@@ -43,7 +43,93 @@ export type ProvenanceDraft = {
   reproducibility: Reproducibility;
   /** Почему происхождение именно такое. Читается человеком, не машиной. */
   note: string | null;
+
+  // --- поля провайдера. У импорта и ручной работы пусты ----------------------
+
+  /** Кто произвёл: 'comfyui'. */
+  providerId?: string | null;
+  /** Ключ записи в реестре моделей. */
+  modelKey?: string | null;
+  /** Версия модели на момент запуска — снимок, а не ссылка. */
+  modelVersion?: string | null;
+  /** Инструкция, ушедшая в модель. Хранится дословно. */
+  prompt?: string | null;
+  /** Строкой, а не числом: seed бывает 64-битным, и точность важнее удобства. */
+  seed?: string | null;
+  /** Остальные параметры запуска, JSON: шаги, cfg, сила LoRA. */
+  parameters?: string | null;
+  /** Отпечаток запущенного графа. По нему видно, тот ли workflow. */
+  workflowHash?: string | null;
+  /** Дескриптор запуска у провайдера. Переживает перезапуск процесса. */
+  providerRunRef?: string | null;
+  /** Состояние окружения на момент запуска, JSON. */
+  envFingerprint?: string | null;
+  /** Отпечаток окружения. Сравнивается быстрее, чем весь JSON. */
+  envFingerprintHash?: string | null;
+  /** Расход, JSON. */
+  spend?: string | null;
 };
+
+/**
+ * Условия, по которым система решает, воспроизводим ли ассет.
+ *
+ * Собираются вызывающим из фактов, а не сообщаются провайдером.
+ */
+export type ReproducibilityFacts = {
+  producedBy: ProducedBy;
+  runtime: 'local' | 'api' | null;
+  /** null — не проверено. Именно null, а не false. */
+  seedStable: boolean | null;
+  seedRecorded: boolean;
+  envFingerprintRecorded: boolean;
+  workflowRecorded: boolean;
+  /** Есть ли в цепочке предков хоть один файл, которого касалась рука. */
+  hasHumanAncestor: boolean;
+};
+
+/**
+ * Вычислить класс воспроизводимости.
+ *
+ * Именно вычислить: провайдер, объявляющий себя воспроизводимым, — это
+ * самоаттестация, которая ничего не стоит. Функция несимметрична намеренно:
+ * попасть в `deterministic` можно только выполнив все условия, а выпасть из
+ * него — по любому одному.
+ */
+export function computeReproducibility(facts: ReproducibilityFacts): Reproducibility {
+  if (facts.producedBy === 'human' || facts.hasHumanAncestor) return 'human-touched';
+  if (facts.producedBy === 'import') return 'unknown';
+
+  const deterministic =
+    facts.runtime === 'local' &&
+    facts.seedStable === true &&
+    facts.seedRecorded &&
+    facts.envFingerprintRecorded &&
+    facts.workflowRecorded;
+
+  return deterministic ? 'deterministic' : 'stochastic';
+}
+
+/** Почему класс получился таким. Идёт в note и в отчёт. */
+export function explainReproducibility(facts: ReproducibilityFacts): string {
+  if (facts.producedBy === 'human' || facts.hasHumanAncestor) {
+    return 'в цепочке есть ручной шаг — повторить нельзя в принципе';
+  }
+  if (facts.producedBy === 'import') {
+    return 'файл существовал до движка, о его создании ничего не известно';
+  }
+
+  const missing: string[] = [];
+  if (facts.runtime !== 'local') missing.push('провайдер не локальный');
+  if (facts.seedStable === null) missing.push('устойчивость seed не проверена');
+  if (facts.seedStable === false) missing.push('seed не даёт повторяемого результата');
+  if (!facts.seedRecorded) missing.push('seed не записан');
+  if (!facts.envFingerprintRecorded) missing.push('отпечаток окружения не записан');
+  if (!facts.workflowRecorded) missing.push('отпечаток workflow не записан');
+
+  return missing.length === 0
+    ? 'локальная модель, устойчивый seed, зафиксированное окружение, ручных шагов нет'
+    : `не хватает для deterministic: ${missing.join('; ')}`;
+}
 
 /**
  * Происхождение файла, существовавшего до движка.

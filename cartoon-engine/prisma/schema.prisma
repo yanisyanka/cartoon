@@ -80,6 +80,10 @@ model Asset {
 
   provenance   Provenance?
   aliases      AssetAlias[]
+  /// Из чего сделан этот ассет.
+  producedFrom AssetInput[] @relation("AssetProducedFrom")
+  /// Где этот ассет послужил входом.
+  usedIn       AssetInput[] @relation("AssetUsedIn")
   character    Character?  @relation(fields: [characterId], references: [id], onDelete: SetNull)
   supersedes   Asset?      @relation("AssetVersions", fields: [supersedesId], references: [id], onDelete: Restrict)
   supersededBy Asset?      @relation("AssetVersions")
@@ -145,11 +149,72 @@ model Provenance {
 
   note String?
 
+  // --- поля провайдера ------------------------------------------------------
+  //
+  // Все nullable: у импортированного файла их нет и быть не может. Заполняются
+  // только когда ассет действительно произведён провайдером через движок.
+
+  /// Кто произвёл: 'comfyui'.
+  providerId String?
+  /// Ключ записи в реестре моделей.
+  modelKey String?
+  /// Версия модели на момент запуска. Снимок, а не ссылка: реестр может
+  /// поменяться, а запись обязана остаться правдой о прошлом.
+  modelVersion String?
+
+  /// Инструкция, ушедшая в модель. Дословно.
+  prompt String?
+  /// Строкой, а не числом: seed бывает 64-битным, точность важнее удобства.
+  seed String?
+  /// Остальные параметры запуска, JSON.
+  parameters String?
+
+  /// Отпечаток запущенного графа. Отвечает на вопрос «тот ли это workflow».
+  workflowHash String?
+  /// Дескриптор запуска у провайдера. Переживает перезапуск процесса, и по
+  /// нему запуск находится в истории провайдера даже после падения нашего.
+  providerRunRef String?
+
+  /// Состояние окружения на момент запуска, JSON: версии, устройство, модели.
+  envFingerprint String?
+  /// Его отпечаток — сравнивать быстрее, чем весь JSON.
+  envFingerprintHash String?
+
+  /// Расход, JSON: доллары, кредиты, токены и признак досчитанности.
+  spend String?
+
   createdAt DateTime @default(now())
 
   asset Asset @relation(fields: [assetId], references: [id], onDelete: Cascade)
 
+  @@index([providerRunRef])
   @@map("provenances")
+}
+
+/// Ассет, из которого сделан другой ассет, и в какой роли он выступал.
+///
+/// Роль обязательна, и это не формальность. У поворота ракурса вход один —
+/// референс, но у следующих шагов их будет несколько: картинка, маска,
+/// предыдущий кадр. Плоский список родителей теряет, какой из них чем был, а
+/// без этого запуск не воспроизвести, даже имея все файлы.
+model AssetInput {
+  id String @id @default(cuid())
+
+  /// Что получилось.
+  assetId String
+  /// Из чего.
+  inputAssetId String
+  /// Чем вход послужил: 'reference'.
+  role String
+
+  createdAt DateTime @default(now())
+
+  asset      Asset @relation("AssetProducedFrom", fields: [assetId], references: [id], onDelete: Cascade)
+  inputAsset Asset @relation("AssetUsedIn", fields: [inputAssetId], references: [id], onDelete: Restrict)
+
+  @@unique([assetId, inputAssetId, role])
+  @@index([inputAssetId])
+  @@map("asset_inputs")
 }
 
 /// Дух из канона MOSSKIN.

@@ -11,8 +11,16 @@ import { InvariantError } from '../errors';
 import type { MediaKind } from '../media-store';
 import type { ProducedBy, ProvenanceDraft, Reproducibility } from '../provenance';
 
-/** Строка вместе с происхождением — иначе она неполна. */
-const WITH_PROVENANCE = { provenance: true } as const;
+/**
+ * Строка вместе с происхождением и входами — иначе она неполна.
+ *
+ * Входы подтягиваются вместе с путём исходного ассета: цепочка происхождения
+ * должна читаться целиком, а не превращаться в череду запросов по идентификатору.
+ */
+const WITH_PROVENANCE = {
+  provenance: true,
+  producedFrom: { include: { inputAsset: { select: { relativePath: true } } } }
+} as const;
 
 type AssetRow = {
   id: string;
@@ -32,7 +40,23 @@ type AssetRow = {
     producedBy: string;
     reproducibility: string;
     note: string | null;
+    providerId: string | null;
+    modelKey: string | null;
+    modelVersion: string | null;
+    prompt: string | null;
+    seed: string | null;
+    parameters: string | null;
+    workflowHash: string | null;
+    providerRunRef: string | null;
+    envFingerprint: string | null;
+    envFingerprintHash: string | null;
+    spend: string | null;
   } | null;
+  producedFrom: {
+    inputAssetId: string;
+    role: string;
+    inputAsset: { relativePath: string };
+  }[];
 };
 
 /**
@@ -62,9 +86,25 @@ export function toAssetView(row: AssetRow): AssetView {
       ? {
           producedBy: row.provenance.producedBy as ProducedBy,
           reproducibility: row.provenance.reproducibility as Reproducibility,
-          note: row.provenance.note
+          note: row.provenance.note,
+          providerId: row.provenance.providerId,
+          modelKey: row.provenance.modelKey,
+          modelVersion: row.provenance.modelVersion,
+          prompt: row.provenance.prompt,
+          seed: row.provenance.seed,
+          parameters: row.provenance.parameters,
+          workflowHash: row.provenance.workflowHash,
+          providerRunRef: row.provenance.providerRunRef,
+          envFingerprint: row.provenance.envFingerprint,
+          envFingerprintHash: row.provenance.envFingerprintHash,
+          spend: row.provenance.spend
         }
-      : null
+      : null,
+    inputs: row.producedFrom.map((link) => ({
+      inputAssetId: link.inputAssetId,
+      inputRelativePath: link.inputAsset.relativePath,
+      role: link.role
+    }))
   };
 }
 
@@ -125,6 +165,8 @@ export type CreateAssetInput = {
   version: number;
   supersedesId: string | null;
   provenance: ProvenanceDraft;
+  /** Из чего сделан. Каждый вход — с ролью, а не просто идентификатором. */
+  inputs?: readonly { inputAssetId: string; role: string }[];
 };
 
 /**
@@ -155,9 +197,31 @@ export async function createAssetWithProvenance(
         create: {
           producedBy: input.provenance.producedBy,
           reproducibility: input.provenance.reproducibility,
-          note: input.provenance.note
+          note: input.provenance.note,
+          providerId: input.provenance.providerId ?? null,
+          modelKey: input.provenance.modelKey ?? null,
+          modelVersion: input.provenance.modelVersion ?? null,
+          prompt: input.provenance.prompt ?? null,
+          seed: input.provenance.seed ?? null,
+          parameters: input.provenance.parameters ?? null,
+          workflowHash: input.provenance.workflowHash ?? null,
+          providerRunRef: input.provenance.providerRunRef ?? null,
+          envFingerprint: input.provenance.envFingerprint ?? null,
+          envFingerprintHash: input.provenance.envFingerprintHash ?? null,
+          spend: input.provenance.spend ?? null
         }
-      }
+      },
+      // Ассет, происхождение и входы создаются одной записью: ассет без входов,
+      // но с providerId — это состояние, в котором цепочка уже оборвана.
+      producedFrom:
+        input.inputs && input.inputs.length > 0
+          ? {
+              create: input.inputs.map((link) => ({
+                inputAssetId: link.inputAssetId,
+                role: link.role
+              }))
+            }
+          : undefined
     },
     include: WITH_PROVENANCE
   });
@@ -250,6 +314,34 @@ export async function listCurrentAssets(db: EngineDb): Promise<AssetView[]> {
 
 export async function countAssets(db: EngineDb): Promise<number> {
   return db.asset.count();
+}
+
+/** Текущая версия ассета данной роли у данного персонажа. */
+export async function findCurrentAssetByCharacterAndRole(
+  db: EngineDb,
+  characterId: string,
+  role: string
+): Promise<AssetView | null> {
+  const row = await db.asset.findFirst({
+    where: { characterId, role },
+    orderBy: [{ relativePath: 'asc' }, { version: 'desc' }],
+    include: WITH_PROVENANCE
+  });
+  return row ? toAssetView(row) : null;
+}
+
+/** Все ассеты роли у персонажа — ракурсов бывает несколько. */
+export async function listAssetsByCharacterAndRole(
+  db: EngineDb,
+  characterId: string,
+  role: string
+): Promise<AssetView[]> {
+  const rows = await db.asset.findMany({
+    where: { characterId, role },
+    orderBy: [{ relativePath: 'asc' }, { version: 'asc' }],
+    include: WITH_PROVENANCE
+  });
+  return rows.map(toAssetView);
 }
 
 // --- псевдонимы ---------------------------------------------------------------

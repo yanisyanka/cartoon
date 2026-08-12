@@ -14,6 +14,7 @@
  */
 import 'dotenv/config';
 import {
+  findCurrentVersionByPath,
   getEngineDb,
   importFiles,
   listAssetAliases,
@@ -37,6 +38,9 @@ import {
   type ClassifiedImport
 } from './services/character-assets-import';
 import { takeInventory } from './services/inventory';
+import { createImageEditProvider } from './providers';
+import { generateTurnaround } from './services/turnaround-generate';
+import { ANGLES, type TurnaroundAngle } from './domain/turnaround';
 
 const ARCHIVE_NOTE = 'оригинал, из которого материал копировался в папку персонажа';
 
@@ -441,6 +445,135 @@ async function commandAssetsInventory(args: string[]): Promise<number> {
   });
 }
 
+// --- provider / turnaround ---------------------------------------------------
+
+async function commandProviderStatus(): Promise<number> {
+  const provider = createImageEditProvider();
+  const status = await provider.configStatus();
+
+  console.log(`Провайдер: ${provider.id} · ${provider.capability} · ${provider.runtime}`);
+  console.log(`Состояние: ${status.state}`);
+  if (status.detail) console.log(`  ${status.detail}`);
+  if (status.facts) {
+    console.log('Окружение:');
+    console.log(
+      JSON.stringify(status.facts, null, 2)
+        .split('\n')
+        .map((line) => `  ${line}`)
+        .join('\n')
+    );
+  }
+  return status.state === 'ready' ? 0 : 1;
+}
+
+async function commandTurnaroundGenerate(args: string[]): Promise<number> {
+  const positional = args.filter((arg) => !arg.startsWith('--'));
+  const slug = positional[0];
+  const angle = positional[1];
+
+  const flag = (name: string): string | undefined => {
+    const index = args.indexOf(`--${name}`);
+    return index >= 0 ? args[index + 1] : undefined;
+  };
+
+  if (!slug || !angle) {
+    console.error(
+      'Использование: cartoon turnaround generate <slug> <angle> --seed <N> [--steps N] [--cfg N]\n' +
+        `Ракурсы: ${ANGLES.map((a) => `${a.angle} (${a.label})`).join(', ')}`
+    );
+    return 1;
+  }
+
+  const seed = flag('seed');
+  if (!seed || !/^\d+$/.test(seed)) {
+    console.error(
+      'Нужен --seed с целым числом. Случайного seed здесь нет намеренно: ' +
+        'незаписанный seed делает запуск неповторимым.'
+    );
+    return 1;
+  }
+
+  const steps = Number(flag('steps') ?? 4);
+  const cfg = Number(flag('cfg') ?? 1.0);
+
+  const store = MediaStore.fromEnv();
+  const provider = createImageEditProvider();
+
+  return withDb(async (db) => {
+    const result = await generateTurnaround(
+      { store, db, provider },
+      {
+        slug,
+        angle: angle as TurnaroundAngle,
+        seed,
+        steps,
+        cfg,
+        onProgress: (message) => console.log(`  · ${message}`)
+      }
+    );
+
+    console.log('\nГотово.');
+    printAsset(result.asset, undefined);
+    console.log(`    из: ${result.reference.relativePath} (роль reference)`);
+    console.log(`    запуск: ${result.run.ref}`);
+    console.log(`    время: ${(result.wallClockMs / 1000).toFixed(1)} с`);
+    return 0;
+  });
+}
+
+/**
+ * Прочитать происхождение назад.
+ *
+ * Ответ на вопрос «что именно было запущено», который должен работать и через
+ * год на выключенном-включённом компьютере.
+ */
+async function commandAssetsProvenance(relativePath: string | undefined): Promise<number> {
+  if (!relativePath) {
+    console.error('Укажите путь ассета.');
+    return 1;
+  }
+
+  return withDb(async (db) => {
+    const asset = await findCurrentVersionByPath(db, relativePath);
+    if (!asset) {
+      console.log(`По пути ${relativePath} записей нет.`);
+      return 1;
+    }
+
+    const p = asset.provenance;
+    console.log(`${asset.relativePath}  v${asset.version}`);
+    console.log(`  sha256            ${asset.sha256}`);
+    console.log(`  роль              ${asset.role ?? '—'}`);
+    console.log(`  произведён        ${p?.producedBy ?? '—'}`);
+    console.log(`  воспроизводимость ${p?.reproducibility ?? '—'}`);
+    if (p?.note) console.log(`     почему         ${p.note}`);
+
+    if (p?.providerId) {
+      console.log(`  провайдер         ${p.providerId}`);
+      console.log(`  модель            ${p.modelKey} (${p.modelVersion})`);
+      console.log(`  seed              ${p.seed}`);
+      console.log(`  workflow sha256   ${p.workflowHash}`);
+      console.log(`  запуск            ${p.providerRunRef}`);
+      console.log(`  окружение sha256  ${p.envFingerprintHash}`);
+      console.log(`  расход            ${p.spend}`);
+      console.log(`  промпт            ${p.prompt}`);
+      console.log(`  параметры         ${p.parameters}`);
+      console.log(`  окружение         ${p.envFingerprint}`);
+    }
+
+    if (asset.inputs.length > 0) {
+      console.log('  входы:');
+      for (const link of asset.inputs) {
+        console.log(`     ${link.role}: ${link.inputRelativePath}`);
+      }
+    } else {
+      console.log('  входов нет');
+    }
+
+    return 0;
+  });
+}
+
 async function commandAssetsHistory(relativePath: string | undefined): Promise<number> {
   if (!relativePath) {
     console.error('Укажите путь, например characters/04-puff/ref_front.png');
@@ -485,7 +618,11 @@ function usage(): void {
       '  cartoon assets import … --dry-run      посчитать, ничего не записывая',
       '  cartoon assets list [--all]            текущие версии либо все',
       '  cartoon assets aliases                 вторые места известных байтов',
-      '  cartoon assets history <путь>          история версий по пути'
+      '  cartoon assets history <путь>          история версий по пути',
+      '  cartoon assets provenance <путь>       откуда взялся файл',
+      '',
+      '  cartoon provider status                готовность ComfyUI, без работы',
+      '  cartoon turnaround generate <slug> <angle> --seed <N> [--steps N] [--cfg N]'
     ].join('\n')
   );
 }
@@ -519,6 +656,12 @@ async function main(): Promise<number> {
       return commandAssetsInventory(rest);
     case 'assets history':
       return commandAssetsHistory(rest[0]);
+    case 'assets provenance':
+      return commandAssetsProvenance(rest[0]);
+    case 'provider status':
+      return commandProviderStatus();
+    case 'turnaround generate':
+      return commandTurnaroundGenerate(rest);
     default:
       usage();
       return 1;

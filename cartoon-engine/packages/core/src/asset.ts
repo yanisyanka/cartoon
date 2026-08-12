@@ -27,11 +27,37 @@ export type AssetView = {
   /** Предыдущая версия по тому же пути. null у первой. */
   supersedesId: string | null;
   createdAt: string;
-  provenance: {
-    producedBy: ProducedBy;
-    reproducibility: Reproducibility;
-    note: string | null;
-  } | null;
+  provenance: AssetProvenanceView | null;
+  /** Из чего сделан. Пусто у импортированных. */
+  inputs: AssetInputView[];
+};
+
+/** Происхождение в том виде, в каком его читают CLI и проверки. */
+export type AssetProvenanceView = {
+  producedBy: ProducedBy;
+  reproducibility: Reproducibility;
+  note: string | null;
+  providerId: string | null;
+  modelKey: string | null;
+  modelVersion: string | null;
+  prompt: string | null;
+  seed: string | null;
+  /** JSON. Разбирается вызывающим — ядро в него не заглядывает. */
+  parameters: string | null;
+  workflowHash: string | null;
+  providerRunRef: string | null;
+  envFingerprint: string | null;
+  envFingerprintHash: string | null;
+  spend: string | null;
+};
+
+export type AssetInputView = {
+  /** Ассет, послуживший входом. */
+  inputAssetId: string;
+  /** Его путь — чтобы происхождение читалось без второго запроса. */
+  inputRelativePath: string;
+  /** Чем он послужил: 'reference'. */
+  role: string;
 };
 
 /** Классификация, которую вызывающий знает, а ядро — нет. */

@@ -15,7 +15,8 @@
     "isolatedModules": true,
     "forceConsistentCasingInFileNames": true,
     "paths": {
-      "@core/*": ["./packages/core/src/*"]
+      "@core/*": ["./packages/core/src/*"],
+      "@providers/comfyui": ["./packages/providers/comfyui/src/index.ts"]
     }
   },
   "include": [

@@ -91,11 +91,24 @@ async function main(): Promise<void> {
     const characterBySlug = new Map(characters.map((c) => [c.slug, c]));
 
     // --- 1. файлы на месте, отпечатки ДО -------------------------------------
-    const allMedia = (await store.findAll(CHARACTERS_DIR)).filter(isMedia);
+    //
+    // Считаются только те файлы, что существовали до движка. Всё, что движок
+    // произвёл сам, из этого счёта исключается: иначе каждая генерация ломала
+    // бы проверку неизменности исходников, хотя исходников она не касается.
+    const produced = new Set(
+      (await listCurrentAssets(db))
+        .filter((asset) => asset.provenance?.producedBy === 'provider')
+        .map((asset) => asset.relativePath)
+    );
+
+    const allMedia = (await store.findAll(CHARACTERS_DIR))
+      .filter(isMedia)
+      .filter((relativePath) => !produced.has(relativePath));
+
     check(
-      `найдено ${EXPECTED_MEDIA_FILES} медиафайлов`,
+      `исходных медиафайлов по-прежнему ${EXPECTED_MEDIA_FILES}`,
       allMedia.length === EXPECTED_MEDIA_FILES,
-      `найдено ${allMedia.length}`
+      `найдено ${allMedia.length}, произведено движком ${produced.size}`
     );
 
     const before = await fingerprintAll(store, allMedia);
@@ -132,10 +145,14 @@ async function main(): Promise<void> {
     );
 
     const totalAssets = await countAssets(db);
+    const importedCount = (await listCurrentAssets(db)).filter(
+      (asset) => asset.provenance?.producedBy === 'import'
+    ).length;
+
     check(
-      `ассетов ровно ${EXPECTED_CHARACTER_ASSETS + EXPECTED_ARCHIVE_ASSETS}`,
-      totalAssets === EXPECTED_CHARACTER_ASSETS + EXPECTED_ARCHIVE_ASSETS,
-      `в базе ${totalAssets}`
+      `импортированных ассетов ровно ${EXPECTED_CHARACTER_ASSETS + EXPECTED_ARCHIVE_ASSETS}`,
+      importedCount === EXPECTED_CHARACTER_ASSETS + EXPECTED_ARCHIVE_ASSETS,
+      `в базе ${importedCount} импортированных из ${totalAssets} всего`
     );
 
     // --- 4. идемпотентность --------------------------------------------------

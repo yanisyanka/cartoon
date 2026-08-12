@@ -10,12 +10,13 @@
  */
 import { createHash } from 'node:crypto';
 import { createReadStream, realpathSync } from 'node:fs';
-import { readFile, readdir, stat } from 'node:fs/promises';
+import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import {
   MediaContentError,
   MediaNotFoundError,
   MediaPathError,
+  MediaWriteError,
   NotConfiguredError
 } from './errors';
 
@@ -500,6 +501,65 @@ export class MediaStore {
       sha256: createHash('sha256').update(bytes).digest('hex'),
       sizeBytes: bytes.length
     };
+  }
+
+  /**
+   * Прочитать файл целиком в память.
+   *
+   * Отдельно от describe(), потому что решает другую задачу: describe отвечает
+   * «что это за файл», readBytes — отдаёт содержимое тому, кто обязан его
+   * передать дальше (провайдеру). Файл при этом только читается.
+   */
+  async readBytes(relativePath: string): Promise<Buffer> {
+    const absolutePath = this.resolve(relativePath);
+
+    const stats = await stat(absolutePath).catch(() => null);
+    if (!stats || !stats.isFile()) {
+      throw new MediaNotFoundError(
+        `Файла нет: ${toPosix(relativePath)} (искали в ${absolutePath}).`
+      );
+    }
+
+    // Граница корня проверяется и здесь: ссылка наружу не должна утечь в
+    // провайдера через чтение.
+    this.canonicalRelative(absolutePath);
+
+    return readFile(absolutePath);
+  }
+
+  /**
+   * Положить НОВЫЙ файл в корень медиа.
+   *
+   * Единственный способ что-либо записать во всём движке, и он устроен так,
+   * что перезаписать существующее нельзя даже по ошибке: флаг 'wx' у
+   * writeFile — это отказ на уровне системного вызова, а не наша проверка,
+   * которую можно обойти гонкой. Существующий файл остаётся неприкосновенным
+   * при любом стечении обстоятельств.
+   *
+   * Каталоги под путь создаются: результат генерации должен куда-то лечь, а
+   * заводить их руками означало бы держать структуру в двух местах.
+   */
+  async receive(relativePath: string, bytes: Buffer): Promise<MediaFacts> {
+    const absolutePath = this.resolve(relativePath);
+
+    await mkdir(path.dirname(absolutePath), { recursive: true });
+
+    try {
+      await writeFile(absolutePath, bytes, { flag: 'wx' });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+        throw new MediaWriteError(
+          `Файл ${toPosix(relativePath)} уже существует. Записывать поверх ` +
+            'нельзя: прежние байты — это отдельный ассет со своей историей. ' +
+            'Выберите другой путь.'
+        );
+      }
+      throw error;
+    }
+
+    // Описываем то, что реально легло на диск, а не то, что собирались класть:
+    // отпечаток должен быть посчитан по файлу, иначе он описывает намерение.
+    return this.describe(relativePath);
   }
 
   /** Есть ли файл. Ошибку не бросает: отсутствие — это ответ, а не сбой. */
