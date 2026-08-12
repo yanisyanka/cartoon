@@ -45,6 +45,7 @@ export type AssetProvenanceView = {
   /** JSON. Разбирается вызывающим — ядро в него не заглядывает. */
   parameters: string | null;
   workflowHash: string | null;
+  workflowJson: string | null;
   providerRunRef: string | null;
   envFingerprint: string | null;
   envFingerprintHash: string | null;

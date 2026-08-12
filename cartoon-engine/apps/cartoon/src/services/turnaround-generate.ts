@@ -252,6 +252,7 @@ export async function generateTurnaround(
       seed: options.seed,
       parameters: JSON.stringify(parameters),
       workflowHash: output.workflowHash,
+      workflowJson: output.workflowJson,
       providerRunRef: run.ref,
       envFingerprint: JSON.stringify(envFingerprint),
       envFingerprintHash: envHash,

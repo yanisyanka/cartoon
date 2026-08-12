@@ -60,6 +60,8 @@ export type ProvenanceDraft = {
   parameters?: string | null;
   /** Отпечаток запущенного графа. По нему видно, тот ли workflow. */
   workflowHash?: string | null;
+  /** Сам граф текстом: по хешу его не восстановить, а по тексту — можно. */
+  workflowJson?: string | null;
   /** Дескриптор запуска у провайдера. Переживает перезапуск процесса. */
   providerRunRef?: string | null;
   /** Состояние окружения на момент запуска, JSON. */

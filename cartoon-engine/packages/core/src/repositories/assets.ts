@@ -47,6 +47,7 @@ type AssetRow = {
     seed: string | null;
     parameters: string | null;
     workflowHash: string | null;
+    workflowJson: string | null;
     providerRunRef: string | null;
     envFingerprint: string | null;
     envFingerprintHash: string | null;
@@ -94,6 +95,7 @@ export function toAssetView(row: AssetRow): AssetView {
           seed: row.provenance.seed,
           parameters: row.provenance.parameters,
           workflowHash: row.provenance.workflowHash,
+          workflowJson: row.provenance.workflowJson,
           providerRunRef: row.provenance.providerRunRef,
           envFingerprint: row.provenance.envFingerprint,
           envFingerprintHash: row.provenance.envFingerprintHash,
@@ -205,6 +207,7 @@ export async function createAssetWithProvenance(
           seed: input.provenance.seed ?? null,
           parameters: input.provenance.parameters ?? null,
           workflowHash: input.provenance.workflowHash ?? null,
+          workflowJson: input.provenance.workflowJson ?? null,
           providerRunRef: input.provenance.providerRunRef ?? null,
           envFingerprint: input.provenance.envFingerprint ?? null,
           envFingerprintHash: input.provenance.envFingerprintHash ?? null,

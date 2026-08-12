@@ -136,6 +136,8 @@ export type ImageEditOutput = {
   providerFileName: string;
   /** Отпечаток запущенного графа: по нему видно, тот ли workflow. */
   workflowHash: string;
+  /** Сам граф текстом — ради восстановимости, а не только опознаваемости. */
+  workflowJson: string;
   /** Состояние окружения на момент запуска. */
   envFingerprint: Record<string, unknown>;
   spend: Spend;

@@ -8,6 +8,7 @@
  *   npm run check:provider
  */
 import 'dotenv/config';
+import { createHash } from 'node:crypto';
 import {
   findModel,
   getEngineDb,
@@ -90,6 +91,21 @@ async function main(): Promise<void> {
       check(`seed записан: ${at}`, !!p?.seed && /^\d+$/.test(p.seed));
       check(`параметры записаны: ${at}`, !!p?.parameters);
       check(`отпечаток workflow записан: ${at}`, /^[0-9a-f]{64}$/.test(p?.workflowHash ?? ''));
+      check(`текст workflow сохранён целиком: ${at}`, !!p?.workflowJson);
+      check(
+        `текст workflow сходится со своим отпечатком: ${at}`,
+        createHash('sha256').update(p?.workflowJson ?? '', 'utf8').digest('hex') ===
+          p?.workflowHash,
+        'граф в базе не соответствует записанному хешу — восстановить запуск нельзя'
+      );
+      check(`сохранённый workflow разбирается как граф: ${at}`, (() => {
+        try {
+          const graph = JSON.parse(p?.workflowJson ?? 'null') as Record<string, unknown>;
+          return !!graph && Object.keys(graph).length > 0;
+        } catch {
+          return false;
+        }
+      })());
       check(`дескриптор запуска записан: ${at}`, !!p?.providerRunRef);
       check(
         `отпечаток окружения записан: ${at}`,

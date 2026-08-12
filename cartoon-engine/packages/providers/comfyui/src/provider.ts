@@ -335,6 +335,9 @@ export class ComfyUiImageEditProvider implements ImageEditProvider {
       bytes,
       providerFileName: image.filename,
       workflowHash: template.templateHash,
+      // Текст графа, а не только его отпечаток: по хешу граф не восстановить,
+      // а установка ComfyUI живёт своей жизнью и файл в ней может исчезнуть.
+      workflowJson: template.raw,
       envFingerprint: this.lastEnvFacts ?? {},
       spend: freeLocalSpend(run.ref),
       load: {

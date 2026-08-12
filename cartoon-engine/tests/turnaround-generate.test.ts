@@ -6,6 +6,7 @@
  * принимает система, а не провайдер.
  */
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import { after, before, beforeEach, test } from 'node:test';
@@ -37,6 +38,12 @@ const REF = 'characters/01-mossy/ref_front.png';
 
 /** Другой валидный PNG — «результат генерации». */
 const GENERATED_PNG = Buffer.concat([PNG_1X1, Buffer.from([0x00, 0x42])]);
+
+/** Граф, который «запускала» заглушка. Сохраняется целиком, не только хешем. */
+const STUB_WORKFLOW_JSON = JSON.stringify({
+  '7': { class_type: 'LoadImage', inputs: { image: 'input.png' } },
+  '12': { class_type: 'KSampler', inputs: { seed: 0, steps: 4 } }
+});
 
 const PASSPORT = {
   slug: '01-mossy',
@@ -99,7 +106,10 @@ class StubProvider implements ImageEditProvider {
     return {
       bytes: this.options.bytes ?? GENERATED_PNG,
       providerFileName: 'turnaround_00001_.png',
-      workflowHash: this.options.workflowHash ?? 'w'.repeat(64),
+      workflowHash:
+        this.options.workflowHash ??
+        createHash('sha256').update(STUB_WORKFLOW_JSON, 'utf8').digest('hex'),
+      workflowJson: STUB_WORKFLOW_JSON,
       envFingerprint: this.options.envFingerprint ?? { comfyuiVersion: '0.30.0' },
       spend: { usd: 0, credits: null, tokens: null, settled: true, sourceRef: 'stub-run-1' },
       load: { gpuSeconds: null, wallClockMs: 10, queueDepth: 0 }
@@ -210,6 +220,35 @@ test('provenance: seed, workflow и окружение записаны', async 
   assert.equal(p?.providerRunRef, 'stub-run-1');
   assert.equal(p?.modelKey, 'comfyui/qwen-image-edit-2509');
   assert.ok(p?.prompt && p.prompt.length > 0);
+});
+
+test('workflow: сохранён целиком, и его текст соответствует записанному sha256', async () => {
+  const provider = new StubProvider();
+  const result = await generateTurnaround({ store, db, provider }, RUN);
+
+  const p = result.asset.provenance;
+  assert.ok(p?.workflowJson, 'текст графа должен быть сохранён, а не только хеш');
+
+  // Главная проверка: по записи можно ВОССТАНОВИТЬ граф, и он тот самый.
+  const recomputed = createHash('sha256')
+    .update(p?.workflowJson ?? '', 'utf8')
+    .digest('hex');
+  assert.equal(recomputed, p?.workflowHash);
+
+  // И восстановленный текст — валидный JSON с теми же узлами.
+  const graph = JSON.parse(p?.workflowJson ?? '{}') as Record<string, unknown>;
+  assert.ok(graph['7']);
+  assert.ok(graph['12']);
+});
+
+test('workflow: подменённый текст перестаёт сходиться с отпечатком', async () => {
+  const provider = new StubProvider();
+  const result = await generateTurnaround({ store, db, provider }, RUN);
+
+  const tampered = `${result.asset.provenance?.workflowJson ?? ''} `;
+  const recomputed = createHash('sha256').update(tampered, 'utf8').digest('hex');
+
+  assert.notEqual(recomputed, result.asset.provenance?.workflowHash);
 });
 
 test('provenance: отпечаток окружения устойчив к порядку ключей', async () => {
