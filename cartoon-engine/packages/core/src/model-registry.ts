@@ -40,10 +40,15 @@ export type ModelSpec = {
     /**
      * Даёт ли один и тот же seed один и тот же результат.
      *
-     * null — НЕ ПРОВЕРЕНО. Это третье состояние, а не «наверное да»: на
-     * воспроизводимости строится весь смысл реестра, и объявлять её без
-     * измерения нельзя. Проверяется одним повторным запуском с тем же seed и
-     * сравнением отпечатков.
+     * Три состояния, и null среди них полноправное: «не проверено» — это не
+     * «наверное да». На воспроизводимости строится весь смысл реестра, и
+     * объявлять её без измерения нельзя ни в ту, ни в другую сторону.
+     *
+     * Проверяется повторным запуском с тем же seed и сравнением отпечатков.
+     * Важная тонкость измерения: ComfyUI кэширует исполнение, и повтор
+     * побайтово того же графа вернёт прежний файл, не считая ничего. Такой
+     * повтор измеряет кэш, а не модель. Настоящий замер требует сброса кэша —
+     * перезапуска сервера между запусками.
      */
     seedStable: boolean | null;
   };
@@ -73,7 +78,7 @@ export const MODELS: readonly ModelSpec[] = [
     target: 'qwen_image_edit_2509_fp8_e4m3fn.safetensors',
     version: 'fp8_e4m3fn/20430698424',
     pricing: LOCAL_FREE,
-    determinism: { seedSupported: true, seedStable: null },
+    determinism: { seedSupported: true, seedStable: false },
     knownFailureModes: [
       'Отъезжает камерой: из плотного кадра делает средний план. ' +
         'Перечислять, что режется краями (СТАТУС.md, «Грабли»).',
@@ -82,7 +87,11 @@ export const MODELS: readonly ModelSpec[] = [
       'Считаемые детали надо писать числом: «ровно три мухомора», «два листа» ' +
         '(СТАТУС.md, «Грабли»).',
       'Формулировка «pure black eyes with no iris» уводит генерацию от эталонов ' +
-        'и запрещена (CAST.md, п.5).'
+        'и запрещена (CAST.md, п.5).',
+      'Один и тот же seed НЕ даёт один и тот же файл. Измерено 12.08.2026: два ' +
+        'запуска с одинаковыми seed, референсом, графом, параметрами и ' +
+        'окружением дали 2af4d258… и 5dbdca7d…, 1 215 154 и 1 216 058 байт при ' +
+        'одинаковом кадре 880×1184 (docs/CE-TASK-003B.md).'
     ],
     enabled: true
   },
@@ -95,7 +104,7 @@ export const MODELS: readonly ModelSpec[] = [
     target: 'Qwen-Edit-2509-Multiple-angles.safetensors',
     version: '236117032',
     pricing: LOCAL_FREE,
-    determinism: { seedSupported: true, seedStable: null },
+    determinism: { seedSupported: true, seedStable: false },
     knownFailureModes: [
       'Нокс: череп надет маской поверх головы. При повороте модель прирастит ' +
         'его к голове или потеряет лицо под ним (СТАТУС.md, «Грабли»).',
@@ -114,7 +123,7 @@ export const MODELS: readonly ModelSpec[] = [
     target: 'Qwen-Image-Edit-2509-Lightning-4steps-V1.0-bf16.safetensors',
     version: '849608296',
     pricing: LOCAL_FREE,
-    determinism: { seedSupported: true, seedStable: null },
+    determinism: { seedSupported: true, seedStable: false },
     knownFailureModes: [],
     enabled: true
   },

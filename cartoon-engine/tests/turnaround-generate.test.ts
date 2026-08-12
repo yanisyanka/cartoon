@@ -20,6 +20,8 @@ import {
   listAssets
 } from '../packages/core/src/repositories/assets';
 import { ProviderNotReadyError, ProviderRunFailedError } from '../packages/core/src/provider';
+import { computeReproducibility } from '../packages/core/src/provenance';
+import { requireModel } from '../packages/core/src/model-registry';
 import type {
   ConfigStatus,
   Estimate,
@@ -279,15 +281,43 @@ test('inputs: эталон записан входом с ролью reference',
   assert.equal(result.asset.inputs[0]?.inputRelativePath, REF);
 });
 
-test('reproducibility: вычисляется системой и при непроверенном seed = stochastic', async () => {
+test('reproducibility: при неустойчивом seed класс stochastic, а не deterministic', async () => {
   const provider = new StubProvider();
   const result = await generateTurnaround({ store, db, provider }, RUN);
 
-  // В реестре у Qwen seedStable = null (не проверено), поэтому deterministic
-  // недостижим — и это правильный ответ, а не недоработка.
+  // В реестре у Qwen seedStable = false — измерено 12.08.2026: два запуска с
+  // одинаковыми seed, референсом, графом, параметрами и окружением дали разные
+  // файлы. Поэтому deterministic недостижим по факту, а не по осторожности.
   assert.equal(result.asset.provenance?.reproducibility, 'stochastic');
-  assert.match(result.asset.provenance?.note ?? '', /устойчивость seed не проверена/);
+  assert.match(result.asset.provenance?.note ?? '', /seed не даёт повторяемого результата/);
   assert.notEqual(result.asset.provenance?.reproducibility, 'unknown');
+});
+
+test('reproducibility: seedStable=false закрывает путь к deterministic', () => {
+  // Прямая проверка правила, без генерации: даже когда всё остальное на месте,
+  // один неустойчивый seed опускает класс. Несимметричность здесь намеренная.
+  const complete = {
+    producedBy: 'provider' as const,
+    runtime: 'local' as const,
+    seedRecorded: true,
+    envFingerprintRecorded: true,
+    workflowRecorded: true,
+    hasHumanAncestor: false
+  };
+
+  assert.equal(computeReproducibility({ ...complete, seedStable: false }), 'stochastic');
+  assert.equal(computeReproducibility({ ...complete, seedStable: null }), 'stochastic');
+  assert.equal(computeReproducibility({ ...complete, seedStable: true }), 'deterministic');
+});
+
+test('registry: у моделей Qwen устойчивость seed измерена и равна false', () => {
+  for (const key of [
+    'comfyui/qwen-image-edit-2509',
+    'comfyui/qwen-edit-2509-multiple-angles',
+    'comfyui/qwen-image-edit-2509-lightning-4steps'
+  ]) {
+    assert.equal(requireModel(key).determinism.seedStable, false, key);
+  }
 });
 
 test('reproducibility: провайдер не может объявить себя воспроизводимым', async () => {

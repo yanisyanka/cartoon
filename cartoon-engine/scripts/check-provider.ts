@@ -53,9 +53,19 @@ async function main(): Promise<void> {
       MODELS.filter((m) => m.runtime === 'local').every((m) => m.pricing.unit === 'free')
     );
     check(
-      'устойчивость seed у Qwen честно не подтверждена',
-      requireModel(TURNAROUND_MODEL_KEY).determinism.seedStable === null,
-      'если её проверили — обновите реестр вместе с доказательством'
+      'устойчивость seed у Qwen измерена и равна false',
+      requireModel(TURNAROUND_MODEL_KEY).determinism.seedStable === false,
+      'измерено 12.08.2026: два запуска с одинаковым seed дали разные файлы'
+    );
+    for (const key of TURNAROUND_LORA_KEYS) {
+      check(
+        `устойчивость seed измерена и у LoRA: ${key}`,
+        requireModel(key).determinism.seedStable === false
+      );
+    }
+    check(
+      'ни одна модель не объявлена воспроизводимой без измерения',
+      MODELS.every((m) => m.determinism.seedStable !== null)
     );
     check(
       'известные отказы описаны и взяты из документов проекта',
