@@ -14,7 +14,7 @@
  * версии физически не может тронуть прошлое. Старый файл на диске тоже никто не
  * удаляет — система лишь фиксирует, что байты стали другими.
  */
-import type { AssetClassification, ImportOutcome } from '../asset';
+import type { AssetClassification, AssetView, ImportOutcome } from '../asset';
 import type { EngineDb } from '../db';
 import { ConcurrentImportError } from '../errors';
 import type { MediaFacts, MediaStore } from '../media-store';
@@ -22,6 +22,7 @@ import { assertValidProvenance, importedProvenance } from '../provenance';
 import type { ProvenanceDraft } from '../provenance';
 import {
   classifyAsset,
+  recordAssetAlias,
   createAssetWithProvenance,
   findAssetBySha256,
   findCurrentVersionByPath,
@@ -36,6 +37,16 @@ export type ImportDeps = {
 export type ImportOptions = {
   provenance?: ProvenanceDraft;
   classification?: AssetClassification;
+  /**
+   * Записать найденную копию псевдонимом вместо того, чтобы сообщить о ней как
+   * о конфликте.
+   *
+   * Флаг обязателен и по умолчанию выключен. Копия в дереве — это либо
+   * осознанное решение (оригиналы, из которых копировали материал), либо
+   * беспорядок, и отличить одно от другого может только человек. Молча
+   * записывать псевдоним значило бы принять это решение за него.
+   */
+  aliasNote?: string | null;
 };
 
 /**
@@ -61,11 +72,7 @@ export async function importFile(
   if (!current) {
     const byContent = await findAssetBySha256(deps.db, facts.sha256);
     if (byContent) {
-      return {
-        status: 'content-conflict',
-        asset: byContent,
-        requestedPath: facts.relativePath
-      };
+      return conflictOrAlias(deps, byContent, facts.relativePath, options.aliasNote);
     }
 
     return create(deps, facts, provenance, classification, 1, null);
@@ -86,11 +93,7 @@ export async function importFile(
     if (byContent.relativePath === facts.relativePath) {
       return { status: 'older-version-on-disk', asset: byContent, currentAsset: current };
     }
-    return {
-      status: 'content-conflict',
-      asset: byContent,
-      requestedPath: facts.relativePath
-    };
+    return conflictOrAlias(deps, byContent, facts.relativePath, options.aliasNote);
   }
 
   // Роль и персонаж наследуются у предыдущей версии, если импорт не сказал
@@ -117,6 +120,34 @@ export async function importFile(
 }
 
 /**
+ * Найдена копия: сообщить о ней или записать как известное второе место.
+ *
+ * Решение принимает вызывающий, а не этот модуль. Без флага копия остаётся
+ * поводом посмотреть глазами: одни и те же байты по двум путям бывают и
+ * осознанным дублированием, и следом неудачной операции, а по самим байтам эти
+ * случаи неразличимы.
+ */
+async function conflictOrAlias(
+  deps: ImportDeps,
+  asset: AssetView,
+  requestedPath: string,
+  aliasNote: string | null | undefined
+): Promise<ImportOutcome> {
+  if (aliasNote === undefined) {
+    return { status: 'content-conflict', asset, requestedPath };
+  }
+
+  const { alreadyKnown } = await recordAssetAlias(
+    deps.db,
+    asset.id,
+    requestedPath,
+    aliasNote
+  );
+
+  return { status: 'alias-recorded', asset, aliasPath: requestedPath, alreadyKnown };
+}
+
+/**
  * Создание строки с разбором гонки.
  *
  * Между чтением и записью соседний процесс мог успеть всё что угодно, поэтому
@@ -140,6 +171,8 @@ async function create(
       mimeType: facts.mimeType,
       sizeBytes: facts.sizeBytes,
       sha256: facts.sha256,
+      width: facts.width,
+      height: facts.height,
       role: classification.role ?? null,
       characterId: classification.characterId ?? null,
       version,
@@ -182,7 +215,11 @@ async function create(
  */
 export async function importFiles(
   deps: ImportDeps,
-  targets: readonly { relativePath: string; classification?: AssetClassification }[],
+  targets: readonly {
+    relativePath: string;
+    classification?: AssetClassification;
+    aliasNote?: string | null;
+  }[],
   provenance?: ProvenanceDraft
 ): Promise<ImportOutcome[]> {
   const outcomes: ImportOutcome[] = [];
@@ -190,7 +227,8 @@ export async function importFiles(
     outcomes.push(
       await importFile(deps, target.relativePath, {
         ...(provenance ? { provenance } : {}),
-        ...(target.classification ? { classification: target.classification } : {})
+        ...(target.classification ? { classification: target.classification } : {}),
+        ...('aliasNote' in target ? { aliasNote: target.aliasNote } : {})
       })
     );
   }

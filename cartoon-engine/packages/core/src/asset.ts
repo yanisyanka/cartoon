@@ -15,6 +15,9 @@ export type AssetView = {
   mimeType: string;
   sizeBytes: number;
   sha256: string;
+  /** Размеры кадра. null у видео и неразбираемых форматов. */
+  width: number | null;
+  height: number | null;
   /** Чем файл является. null — ещё не классифицирован. */
   role: string | null;
   /** Кто изображён. null — файл не привязан к персонажу. */
@@ -80,6 +83,15 @@ export type ImportOutcome =
       asset: AssetView;
       /** Версия, которую реестр числит текущей. */
       currentAsset: AssetView;
+    }
+  | {
+      status: 'alias-recorded';
+      /** Ассет, чьи байты лежат по этому пути. */
+      asset: AssetView;
+      /** Путь копии, записанный как ещё одно место тех же байтов. */
+      aliasPath: string;
+      /** true — псевдоним уже был записан раньше. */
+      alreadyKnown: boolean;
     };
 
 /** Появилась ли в результате этого вызова новая строка. */

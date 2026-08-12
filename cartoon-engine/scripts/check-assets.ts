@@ -1,39 +1,49 @@
 /**
- * Проверка реестра ассетов: CE-TASK-001 + CE-TASK-002.
+ * Проверка реестра ассетов: CE-TASK-001 … 003A.
  *
- * Сети не касается и денег не тратит. Работает с настоящей базой и настоящими
- * файлами — иначе она не проверяла бы то, ради чего затевалась.
+ * Сети не касается, денег не тратит, генеративных моделей не запускает.
+ * Работает с настоящей базой и настоящими файлами — иначе она не проверяла бы
+ * то, ради чего затевалась.
  *
- * Главное здесь — последняя проверка. Отпечатки всех десяти эталонов снимаются
- * ДО импорта и пересчитываются ПОСЛЕ. Совпадение — единственное машинное
+ * Главное здесь — последняя проверка. Отпечатки ВСЕХ медиафайлов снимаются до
+ * импорта и пересчитываются после. Совпадение — единственное машинное
  * доказательство того, что регистрация файлы не тронула. Все прочие обещания
  * («мы же только читаем») проверкой не являются.
  *
- * Персонажи должны быть импортированы заранее: эталон без персонажа не
- * регистрируется. Порядок задан в npm run check.
+ * Персонажи должны быть импортированы заранее. Порядок задан в npm run check.
  *
  *   npm run check:assets
  */
 import 'dotenv/config';
 import {
+  countAssetAliases,
   countAssets,
   getEngineDb,
+  listAssetAliases,
   listCurrentAssets,
   MediaStore,
-  needsAttention,
   type AssetView
 } from '@core/index';
 import { listCharacters } from '../apps/cartoon/src/repositories/characters';
 import {
-  importCharacterReferences,
-  REFERENCE_FILE,
-  REFERENCE_ROLE,
-  slugFromReferencePath
-} from '../apps/cartoon/src/services/reference-import';
+  ARCHIVE_DIR,
+  importArchive,
+  importCharacterAssets
+} from '../apps/cartoon/src/services/character-assets-import';
 import { CHARACTERS_DIR } from '../apps/cartoon/src/services/character-import';
 import { isAssetRole } from '../apps/cartoon/src/domain/roles';
+import { MEDIA_EXTENSIONS } from '../apps/cartoon/src/services/inventory';
 
-const EXPECTED_REFERENCES = 10;
+const EXPECTED_CHARACTERS = 10;
+/** Десять папок по три файла: эталон, карточка, клип. */
+const EXPECTED_CHARACTER_ASSETS = 30;
+/** Замер архива: 28 файлов побайтово совпадают с папками персонажей. */
+const EXPECTED_ALIASES = 28;
+/** Остальные архивные файлы регистрируются без роли и без персонажа. */
+const EXPECTED_ARCHIVE_ASSETS = 10;
+const EXPECTED_MEDIA_FILES = 68;
+
+const ARCHIVE_NOTE = 'оригинал, из которого материал копировался в папку персонажа';
 
 const passed: string[] = [];
 
@@ -53,12 +63,14 @@ async function fingerprintAll(
   const result = new Map<string, Fingerprint>();
   for (const relativePath of paths) {
     const facts = await store.describe(relativePath);
-    result.set(facts.relativePath, {
-      sha256: facts.sha256,
-      sizeBytes: facts.sizeBytes
-    });
+    result.set(facts.relativePath, { sha256: facts.sha256, sizeBytes: facts.sizeBytes });
   }
   return result;
+}
+
+function isMedia(relativePath: string): boolean {
+  const lower = relativePath.toLowerCase();
+  return MEDIA_EXTENSIONS.some((extension) => lower.endsWith(extension));
 }
 
 async function main(): Promise<void> {
@@ -71,159 +83,192 @@ async function main(): Promise<void> {
     // --- предусловие ---------------------------------------------------------
     const characters = await listCharacters(db);
     check(
-      `персонажи импортированы (${EXPECTED_REFERENCES})`,
-      characters.length === EXPECTED_REFERENCES,
+      `персонажи импортированы (${EXPECTED_CHARACTERS})`,
+      characters.length === EXPECTED_CHARACTERS,
       `в базе ${characters.length}. Сначала: npm run check:canon`
     );
     const characterById = new Map(characters.map((c) => [c.id, c]));
     const characterBySlug = new Map(characters.map((c) => [c.slug, c]));
 
-    // --- 1. файлы на месте ---------------------------------------------------
-    const references = await store.find(REFERENCE_FILE, CHARACTERS_DIR);
+    // --- 1. файлы на месте, отпечатки ДО -------------------------------------
+    const allMedia = (await store.findAll(CHARACTERS_DIR)).filter(isMedia);
     check(
-      `найдено ровно ${EXPECTED_REFERENCES} файлов ${REFERENCE_FILE}`,
-      references.length === EXPECTED_REFERENCES,
-      `найдено ${references.length}`
+      `найдено ${EXPECTED_MEDIA_FILES} медиафайлов`,
+      allMedia.length === EXPECTED_MEDIA_FILES,
+      `найдено ${allMedia.length}`
     );
 
-    // --- 2. отпечатки ДО импорта --------------------------------------------
-    const before = await fingerprintAll(store, references);
-
+    const before = await fingerprintAll(store, allMedia);
     check(
       'у каждого файла посчитан sha256',
       [...before.values()].every((f) => /^[0-9a-f]{64}$/.test(f.sha256))
     );
-    check(
-      'отпечатки всех файлов различны',
-      new Set([...before.values()].map((f) => f.sha256)).size === references.length
-    );
     check('все размеры положительны', [...before.values()].every((f) => f.sizeBytes > 0));
 
-    // --- 3. импорт -----------------------------------------------------------
-    const countBefore = await countAssets(db);
-    const first = await importCharacterReferences({ store, db });
-
+    // --- 2. импорт материала персонажей --------------------------------------
+    const first = await importCharacterAssets({ store, db });
     check(
-      'импорт не сообщил о конфликтах',
-      !first.some(needsAttention),
-      first.filter(needsAttention).map((o) => o.status).join(', ')
-    );
-
-    const newRows = first.filter(
-      (o) => o.status === 'registered' || o.status === 'new-version'
-    ).length;
-    const countAfterFirst = await countAssets(db);
-
-    check(
-      'число строк выросло ровно на число новых записей',
-      countAfterFirst === countBefore + newRows,
-      `было ${countBefore}, стало ${countAfterFirst}, новых ${newRows}`
-    );
-
-    // --- 4. повторный импорт не создаёт дубликатов ---------------------------
-    const second = await importCharacterReferences({ store, db });
-    const countAfterSecond = await countAssets(db);
-
-    check(
-      'повторный импорт не создал ни одной строки',
-      countAfterSecond === countAfterFirst,
-      `было ${countAfterFirst}, стало ${countAfterSecond}`
+      `обработано ${EXPECTED_CHARACTER_ASSETS} файлов персонажей`,
+      first.length === EXPECTED_CHARACTER_ASSETS,
+      `обработано ${first.length}`
     );
     check(
-      'повторный импорт опознал все файлы как уже зарегистрированные',
-      second.every((o) => o.status === 'already-registered'),
-      second.map((o) => o.status).join(', ')
+      'все файлы персонажей опознаны по содержимому',
+      first.every((r) => r.unclassifiedReason === null),
+      first
+        .filter((r) => r.unclassifiedReason)
+        .map((r) => `${r.relativePath}: ${r.unclassifiedReason}`)
+        .join('; ')
+    );
+
+    // --- 3. архив ------------------------------------------------------------
+    await importArchive({ store, db }, ARCHIVE_DIR, ARCHIVE_NOTE);
+
+    const aliasCount = await countAssetAliases(db);
+    check(
+      `псевдонимов ровно ${EXPECTED_ALIASES}`,
+      aliasCount === EXPECTED_ALIASES,
+      `в базе ${aliasCount}`
+    );
+
+    const totalAssets = await countAssets(db);
+    check(
+      `ассетов ровно ${EXPECTED_CHARACTER_ASSETS + EXPECTED_ARCHIVE_ASSETS}`,
+      totalAssets === EXPECTED_CHARACTER_ASSETS + EXPECTED_ARCHIVE_ASSETS,
+      `в базе ${totalAssets}`
+    );
+
+    // --- 4. идемпотентность --------------------------------------------------
+    const secondCharacters = await importCharacterAssets({ store, db });
+    await importArchive({ store, db }, ARCHIVE_DIR, ARCHIVE_NOTE);
+
+    check(
+      'повторный импорт не создал ни одного ассета',
+      (await countAssets(db)) === totalAssets,
+      `было ${totalAssets}, стало ${await countAssets(db)}`
+    );
+    check(
+      'повторный импорт не создал ни одного псевдонима',
+      (await countAssetAliases(db)) === aliasCount
     );
     check(
       'повторный импорт ничего не доклассифицировал',
-      second.every((o) => o.status === 'already-registered' && !o.classified)
+      secondCharacters.every(
+        (r) => r.outcome?.status === 'already-registered' && !r.outcome.classified
+      )
     );
 
     // --- 5. содержимое реестра ----------------------------------------------
     const current = await listCurrentAssets(db);
     const byPath = new Map<string, AssetView>(current.map((a) => [a.relativePath, a]));
 
-    for (const relativePath of references) {
-      const expected = before.get(relativePath);
-      const asset = byPath.get(relativePath);
+    const expectedRoles: Record<string, string> = {
+      'ref_front.png': 'ref-front',
+      'card.jpg': 'card',
+      'clip.mp4': 'clip'
+    };
 
-      check(`зарегистрирован: ${relativePath}`, asset !== undefined);
-      if (!asset || !expected) continue;
+    for (const character of characters) {
+      for (const [fileName, role] of Object.entries(expectedRoles)) {
+        const relativePath = `${CHARACTERS_DIR}/${character.slug}/${fileName}`;
+        const asset = byPath.get(relativePath);
+        const expected = before.get(relativePath);
 
-      check(
-        `sha256 в базе совпадает с файлом: ${relativePath}`,
-        asset.sha256 === expected.sha256
-      );
-      check(
-        `размер в базе совпадает с файлом: ${relativePath}`,
-        asset.sizeBytes === expected.sizeBytes
-      );
-      check(
-        `relativePath корректен: ${relativePath}`,
-        !asset.relativePath.startsWith('/') &&
-          !/^[a-zA-Z]:/.test(asset.relativePath) &&
-          !asset.relativePath.includes('\\') &&
-          !asset.relativePath.includes('..')
-      );
-      check(
-        `путь из базы разрешается в существующий файл: ${relativePath}`,
-        await store.exists(asset.relativePath)
-      );
-      check(`тип определён как image: ${relativePath}`, asset.type === 'image');
-      check(
-        `mimeType определён по содержимому: ${relativePath}`,
-        asset.mimeType === 'image/png'
-      );
-      check(
-        `producedBy = import: ${relativePath}`,
-        asset.provenance?.producedBy === 'import',
-        `получено ${asset.provenance?.producedBy}`
-      );
-      check(
-        `reproducibility = unknown: ${relativePath}`,
-        asset.provenance?.reproducibility === 'unknown',
-        `получено ${asset.provenance?.reproducibility}`
-      );
+        check(`зарегистрирован: ${relativePath}`, asset !== undefined);
+        if (!asset || !expected) continue;
 
-      // --- новое в CE-TASK-002 ---
-      check(
-        `role = ${REFERENCE_ROLE}: ${relativePath}`,
-        asset.role === REFERENCE_ROLE,
-        `получено ${asset.role}`
-      );
-      check(
-        `роль из известного словаря: ${relativePath}`,
-        asset.role !== null && isAssetRole(asset.role)
-      );
-      check(`version = 1: ${relativePath}`, asset.version === 1);
-      check(`первая версия ни на что не ссылается: ${relativePath}`, asset.supersedesId === null);
-
-      const slug = slugFromReferencePath(relativePath);
-      const expectedCharacter = characterBySlug.get(slug);
-      check(
-        `привязан к персонажу ${slug}: ${relativePath}`,
-        asset.characterId !== null && asset.characterId === expectedCharacter?.id,
-        `в базе characterId=${asset.characterId}, ожидался ${expectedCharacter?.id}`
-      );
-      check(
-        `персонаж существует и это ${slug}: ${relativePath}`,
-        asset.characterId !== null && characterById.get(asset.characterId)?.slug === slug
-      );
+        check(`sha256 совпадает: ${relativePath}`, asset.sha256 === expected.sha256);
+        check(`размер совпадает: ${relativePath}`, asset.sizeBytes === expected.sizeBytes);
+        check(
+          `relativePath корректен: ${relativePath}`,
+          !asset.relativePath.startsWith('/') &&
+            !/^[a-zA-Z]:/.test(asset.relativePath) &&
+            !asset.relativePath.includes('\\') &&
+            !asset.relativePath.includes('..')
+        );
+        check(
+          `путь разрешается в существующий файл: ${relativePath}`,
+          await store.exists(asset.relativePath)
+        );
+        check(`role = ${role}: ${relativePath}`, asset.role === role, `получено ${asset.role}`);
+        check(
+          `роль из словаря: ${relativePath}`,
+          asset.role !== null && isAssetRole(asset.role)
+        );
+        check(`version = 1: ${relativePath}`, asset.version === 1);
+        check(
+          `привязан к ${character.slug}: ${relativePath}`,
+          asset.characterId === character.id
+        );
+        check(
+          `персонаж тот самый: ${relativePath}`,
+          asset.characterId !== null &&
+            characterById.get(asset.characterId)?.slug === character.slug
+        );
+        check(
+          `producedBy = import: ${relativePath}`,
+          asset.provenance?.producedBy === 'import'
+        );
+        check(
+          `reproducibility = unknown: ${relativePath}`,
+          asset.provenance?.reproducibility === 'unknown'
+        );
+      }
     }
 
     check(
-      'у каждого персонажа ровно один текущий эталон',
-      characters.every(
-        (character) =>
-          current.filter(
-            (asset) => asset.characterId === character.id && asset.role === REFERENCE_ROLE
-          ).length === 1
+      'у каждого персонажа ровно один эталон, одна карточка и один клип',
+      characters.every((character) =>
+        ['ref-front', 'card', 'clip'].every(
+          (role) =>
+            current.filter((a) => a.characterId === character.id && a.role === role).length === 1
+        )
       )
     );
 
-    // --- 6. файлы не изменились ---------------------------------------------
-    const after = await fingerprintAll(store, references);
+    // --- 6. архивные ассеты не получили выдуманных ролей ---------------------
+    const archived = current.filter((a) => a.relativePath.startsWith(`${ARCHIVE_DIR}/`));
+    check(
+      `архивных ассетов ${EXPECTED_ARCHIVE_ASSETS}`,
+      archived.length === EXPECTED_ARCHIVE_ASSETS,
+      `найдено ${archived.length}`
+    );
+    check(
+      'ни один архивный ассет не получил роли',
+      archived.every((a) => a.role === null),
+      archived.filter((a) => a.role).map((a) => `${a.relativePath}=${a.role}`).join(', ')
+    );
+    check(
+      'ни один архивный ассет не привязан к персонажу',
+      archived.every((a) => a.characterId === null)
+    );
+    check(
+      'происхождение архивных — import/unknown',
+      archived.every(
+        (a) =>
+          a.provenance?.producedBy === 'import' &&
+          a.provenance.reproducibility === 'unknown'
+      )
+    );
 
+    // --- 7. псевдонимы указывают на настоящие ассеты -------------------------
+    const aliases = await listAssetAliases(db);
+    const assetIds = new Set(current.map((a) => a.id));
+    check(
+      'каждый псевдоним указывает на существующий ассет',
+      aliases.every((alias) => assetIds.has(alias.assetId))
+    );
+    check(
+      'путь псевдонима существует на диске',
+      (await Promise.all(aliases.map((alias) => store.exists(alias.relativePath)))).every(Boolean)
+    );
+    check(
+      'ни один путь не является одновременно ассетом и псевдонимом',
+      aliases.every((alias) => !byPath.has(alias.relativePath))
+    );
+
+    // --- 8. файлы не изменились ---------------------------------------------
+    const after = await fingerprintAll(store, allMedia);
     check('после импорта на месте всё те же файлы', after.size === before.size);
 
     for (const [relativePath, expected] of before) {

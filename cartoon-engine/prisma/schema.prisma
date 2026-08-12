@@ -48,6 +48,13 @@ model Asset {
   /// один ассет, где бы они ни лежали.
   sha256 String @unique
 
+  /// Размеры кадра в пикселях. null у видео и у форматов, которые ядро не
+  /// разбирает. Хранятся потому, что именно они отличают «файл называется
+  /// card.jpg» от «файл действительно карточка 190×325»: роль по имени —
+  /// догадка, роль по размеру кадра — довод.
+  width  Int?
+  height Int?
+
   /// Чем файл является: ref-front | turnaround | emotion-still | plate |
   /// storyboard | render | other.
   ///
@@ -72,6 +79,7 @@ model Asset {
   createdAt DateTime @default(now())
 
   provenance   Provenance?
+  aliases      AssetAlias[]
   character    Character?  @relation(fields: [characterId], references: [id], onDelete: SetNull)
   supersedes   Asset?      @relation("AssetVersions", fields: [supersedesId], references: [id], onDelete: Restrict)
   supersededBy Asset?      @relation("AssetVersions")
@@ -80,6 +88,39 @@ model Asset {
   @@index([relativePath])
   @@index([characterId, role])
   @@map("assets")
+}
+
+/// Ещё одно место, где лежат ТЕ ЖЕ САМЫЕ байты.
+///
+/// Появилась не про запас, а по факту: в `characters/MOSS KIN-лесные духи/`
+/// лежат оригиналы, из которых материал копировался в папки персонажей.
+/// Копировался намеренно — чтобы не сломать ссылки в проекте Premiere, — так
+/// что 28 файлов существуют в двух местах одновременно, и это нормальное
+/// состояние проекта, а не беспорядок.
+///
+/// Второй строкой Asset такой файл быть не может: sha256 уникален глобально,
+/// потому что одни и те же байты — это один ассет. Но и молчать о втором пути
+/// нельзя: тогда реестр не знал бы о половине файлов на диске.
+///
+/// Псевдоним не заводится сам собой. Импорт по умолчанию сообщает о находке
+/// как о конфликте, и только явный флаг превращает её в запись: подтвердить,
+/// что копия сделана осознанно, может лишь человек.
+model AssetAlias {
+  id      String @id @default(cuid())
+  assetId String
+
+  /// Путь копии относительно MEDIA_ROOT. Уникален: одно место — одна запись.
+  relativePath String @unique
+
+  /// Чем этот путь является. Например: оригинал, из которого копировали.
+  note String?
+
+  createdAt DateTime @default(now())
+
+  asset Asset @relation(fields: [assetId], references: [id], onDelete: Cascade)
+
+  @@index([assetId])
+  @@map("asset_aliases")
 }
 
 /// Происхождение ассета: откуда взялись байты и можно ли получить их снова.

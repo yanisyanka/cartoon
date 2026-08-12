@@ -21,6 +21,8 @@ type AssetRow = {
   mimeType: string;
   sizeBytes: number;
   sha256: string;
+  width: number | null;
+  height: number | null;
   role: string | null;
   characterId: string | null;
   version: number;
@@ -49,6 +51,8 @@ export function toAssetView(row: AssetRow): AssetView {
     mimeType: row.mimeType,
     sizeBytes: row.sizeBytes,
     sha256: row.sha256,
+    width: row.width,
+    height: row.height,
     role: row.role,
     characterId: row.characterId,
     version: row.version,
@@ -114,6 +118,8 @@ export type CreateAssetInput = {
   mimeType: string;
   sizeBytes: number;
   sha256: string;
+  width: number | null;
+  height: number | null;
   role: string | null;
   characterId: string | null;
   version: number;
@@ -139,6 +145,8 @@ export async function createAssetWithProvenance(
       mimeType: input.mimeType,
       sizeBytes: input.sizeBytes,
       sha256: input.sha256,
+      width: input.width,
+      height: input.height,
       role: input.role,
       characterId: input.characterId,
       version: input.version,
@@ -242,6 +250,61 @@ export async function listCurrentAssets(db: EngineDb): Promise<AssetView[]> {
 
 export async function countAssets(db: EngineDb): Promise<number> {
   return db.asset.count();
+}
+
+// --- псевдонимы ---------------------------------------------------------------
+
+export type AssetAliasView = {
+  id: string;
+  assetId: string;
+  relativePath: string;
+  note: string | null;
+};
+
+/**
+ * Записать ещё одно место, где лежат те же байты.
+ *
+ * Идемпотентна: тот же путь второй раз не создаёт вторую запись, а возвращает
+ * прежнюю. Путь, уже занятый настоящим ассетом, псевдонимом стать не может —
+ * это означало бы, что одно место описано дважды и по-разному.
+ */
+export async function recordAssetAlias(
+  db: EngineDb,
+  assetId: string,
+  relativePath: string,
+  note: string | null
+): Promise<{ alias: AssetAliasView; alreadyKnown: boolean }> {
+  const existing = await db.assetAlias.findUnique({ where: { relativePath } });
+
+  if (existing) {
+    if (existing.assetId !== assetId) {
+      throw new InvariantError(
+        `Путь ${relativePath} уже записан псевдонимом другого ассета. ` +
+          'Содержимое по нему изменилось — это не копия, а отдельная история.'
+      );
+    }
+    return { alias: existing, alreadyKnown: true };
+  }
+
+  const occupied = await db.asset.findFirst({ where: { relativePath } });
+  if (occupied) {
+    throw new InvariantError(
+      `Путь ${relativePath} — самостоятельный ассет, псевдонимом он быть не может.`
+    );
+  }
+
+  const alias = await db.assetAlias.create({
+    data: { assetId, relativePath, note }
+  });
+  return { alias, alreadyKnown: false };
+}
+
+export async function listAssetAliases(db: EngineDb): Promise<AssetAliasView[]> {
+  return db.assetAlias.findMany({ orderBy: { relativePath: 'asc' } });
+}
+
+export async function countAssetAliases(db: EngineDb): Promise<number> {
+  return db.assetAlias.count();
 }
 
 /** Уникальный индекс нарушен: строку успел создать соседний вызов. */

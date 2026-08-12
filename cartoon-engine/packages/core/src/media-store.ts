@@ -34,6 +34,15 @@ export type MediaFacts = {
   sha256: string;
   mimeType: string;
   type: MediaKind;
+  /**
+   * Размер в пикселях. null — формат не разбирается или заголовок повреждён.
+   *
+   * Нужен не для красоты: это единственное, чем «файл называется card.jpg»
+   * отличается от «файл действительно карточка 190×325». Роль по имени —
+   * догадка, роль по размеру кадра — довод.
+   */
+  width: number | null;
+  height: number | null;
 };
 
 // --- опознание по содержимому ------------------------------------------------
@@ -45,7 +54,17 @@ export type MediaFacts = {
 // почти бесплатно.
 
 /** Сколько первых байт нужно самой длинной из известных сигнатур. */
-const HEADER_BYTES = 16;
+const SIGNATURE_BYTES = 16;
+
+/**
+ * Сколько байт накапливается ради размеров кадра.
+ *
+ * У PNG размеры лежат в IHDR — первые 24 байта. У JPEG маркер SOF может
+ * оказаться сильно дальше: перед ним идут EXIF, ICC-профиль и миниатюра.
+ * 64 КБ покрывают это с запасом и стоят ничего: файл всё равно читается
+ * целиком ради отпечатка, а в памяти живёт один такой буфер.
+ */
+const HEADER_BYTES = 64 * 1024;
 
 type Signature = {
   mimeType: string;
@@ -137,6 +156,51 @@ export function describeHeader(header: Buffer): string {
     .toString('latin1')
     .replace(/[^\x20-\x7e]/g, '.');
   return `${hex} ("${printable}")`;
+}
+
+export type Dimensions = { width: number; height: number } | null;
+
+/**
+ * Размеры кадра из заголовка. null — формат не разбирается или заголовок битый.
+ *
+ * Разбираются только PNG и JPEG, и этого достаточно: у видео размеры лежат в
+ * боксах MP4, а тащить их парсер ради инвентаризации незачем — ffprobe уже есть
+ * в системе и вызывается снаружи ядра. Ядро внешних программ не запускает.
+ */
+export function readDimensions(header: Buffer, mimeType: string): Dimensions {
+  if (mimeType === 'image/png') {
+    // IHDR обязан быть первым чанком: сигнатура 8 байт, длина 4, тип 4,
+    // дальше ширина и высота по 4 байта.
+    if (header.length < 24 || ascii(header, 12, 4) !== 'IHDR') return null;
+    const width = header.readUInt32BE(16);
+    const height = header.readUInt32BE(20);
+    return width > 0 && height > 0 ? { width, height } : null;
+  }
+
+  if (mimeType === 'image/jpeg') {
+    // Идём по маркерам до Start Of Frame. SOF бывает нескольких видов
+    // (базовый, прогрессивный и прочие), но размеры во всех лежат одинаково.
+    // Исключены DHT (C4), JPG (C8) и DAC (CC) — это не кадровые маркеры.
+    let offset = 2;
+    while (offset + 9 < header.length) {
+      if (header[offset] !== 0xff) {
+        offset += 1;
+        continue;
+      }
+      const marker = header[offset + 1] as number;
+      if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+        const height = header.readUInt16BE(offset + 5);
+        const width = header.readUInt16BE(offset + 7);
+        return width > 0 && height > 0 ? { width, height } : null;
+      }
+      const length = header.readUInt16BE(offset + 2);
+      if (length < 2) return null;
+      offset += 2 + length;
+    }
+    return null;
+  }
+
+  return null;
 }
 
 export type SniffResult = { mimeType: string; type: MediaKind };
@@ -382,7 +446,8 @@ export class MediaStore {
       );
     }
 
-    const { mimeType, type } = sniff(header, path.basename(absolutePath));
+    const { mimeType, type } = sniff(header.subarray(0, SIGNATURE_BYTES), path.basename(absolutePath));
+    const dimensions = readDimensions(header, mimeType);
 
     return {
       relativePath: canonical,
@@ -390,7 +455,9 @@ export class MediaStore {
       sizeBytes: counted,
       sha256: hash.digest('hex'),
       mimeType,
-      type
+      type,
+      width: dimensions?.width ?? null,
+      height: dimensions?.height ?? null
     };
   }
 
@@ -451,23 +518,35 @@ export class MediaStore {
    * ради одного шаблона.
    */
   async find(fileName: string, withinRelativeDir = '.'): Promise<string[]> {
+    return this.walk(withinRelativeDir, (name) => name === fileName);
+  }
+
+  /** Относительные пути всех файлов поддерева. Порядок устойчив. */
+  async findAll(withinRelativeDir = '.'): Promise<string[]> {
+    return this.walk(withinRelativeDir, () => true);
+  }
+
+  private async walk(
+    withinRelativeDir: string,
+    accept: (fileName: string) => boolean
+  ): Promise<string[]> {
     const startAt = this.resolve(withinRelativeDir);
     const found: string[] = [];
 
-    const walk = async (directory: string): Promise<void> => {
+    const visit = async (directory: string): Promise<void> => {
       const entries = await readdir(directory, { withFileTypes: true });
       for (const entry of entries) {
         const full = path.join(directory, entry.name);
         if (entry.isDirectory()) {
           if (SKIP_DIRECTORIES.has(entry.name)) continue;
-          await walk(full);
-        } else if (entry.isFile() && entry.name === fileName) {
+          await visit(full);
+        } else if (entry.isFile() && accept(entry.name)) {
           found.push(this.toRelative(full));
         }
       }
     };
 
-    await walk(startAt);
+    await visit(startAt);
     return found.sort();
   }
 }
