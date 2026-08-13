@@ -19,6 +19,7 @@
     "backfill:workflow": "tsx scripts/backfill-workflow-json.ts",
     "backfill:camera-angle": "tsx scripts/backfill-camera-angle.ts",
     "apply:camera-convention": "tsx scripts/apply-object-camera-convention.ts",
+    "extract:back-ref": "tsx scripts/extract-back-reference.ts",
     "experiment:seed": "tsx scripts/seed-stability.ts"
   },
   "dependencies": {

@@ -18,6 +18,7 @@ import { importFile } from '../packages/core/src/services/asset-import';
 import {
   countAssetAliases,
   countAssets,
+  createAssetWithProvenance,
   listAssetAliases,
   listAssets,
   listCurrentAssets,
@@ -25,6 +26,7 @@ import {
   recordAssetAlias
 } from '../packages/core/src/repositories/assets';
 import { InvariantError } from '../packages/core/src/errors';
+import { isAssetRole } from '../apps/cartoon/src/domain/roles';
 import {
   createSandbox,
   JPEG_MINIMAL,
@@ -251,6 +253,70 @@ test('cameraAngle: проставленный ракурс импортом не
 
   const [asset] = await listAssets(db);
   assert.equal(asset?.cameraAngle, 'three-quarter-left');
+});
+
+// --- задний эталон -------------------------------------------------------------
+
+test('ref-back: роль есть в словаре и отличима от turnaround', () => {
+  assert.equal(isAssetRole('ref-back'), true);
+  assert.notEqual('ref-back', 'turnaround');
+  // Эталон и продукция — разные категории, и словарь обязан их различать:
+  // на эталон ссылаются как на источник, продукцию переделывают.
+  assert.equal(isAssetRole('ref-front'), true);
+});
+
+test('ref-back: эталон несёт ракурс back и не является версией ракурса', async () => {
+  await sandbox.put(MOSSY, PNG_1X1);
+  const outcome = await importFile({ store, db }, MOSSY, {
+    classification: { role: 'ref-back', cameraAngle: 'back' }
+  });
+
+  assert.equal(outcome.asset.role, 'ref-back');
+  assert.equal(outcome.asset.cameraAngle, 'back');
+  assert.equal(outcome.asset.version, 1);
+  assert.equal(outcome.asset.supersedesId, null);
+});
+
+test('ref-back: вход с ролью source отличается от reference', async () => {
+  // Кадр вырезан из клипа, а не порождён из него генерацией. Роль входа
+  // называет именно это, и по ней две цепочки не спутать.
+  await sandbox.put(MOSSY, PNG_1X1);
+  const clip = await importFile({ store, db }, MOSSY, {
+    classification: { role: 'clip' }
+  });
+
+  const frame = await createAssetWithProvenance(db, {
+    relativePath: 'characters/01-mossy/ref_back.png',
+    type: 'image',
+    mimeType: 'image/png',
+    sizeBytes: 10,
+    sha256: 'b'.repeat(64),
+    width: 828,
+    height: 1108,
+    role: 'ref-back',
+    cameraAngle: 'back',
+    characterId: null,
+    version: 1,
+    supersedesId: null,
+    provenance: {
+      producedBy: 'provider',
+      reproducibility: 'stochastic',
+      note: 'вырезан из клипа',
+      modelKey: 'ffmpeg/cli'
+    },
+    inputs: [{ inputAssetId: clip.asset.id, role: 'source' }]
+  });
+
+  assert.equal(frame.inputs.length, 1);
+  assert.equal(frame.inputs[0]?.role, 'source');
+  assert.notEqual(frame.inputs[0]?.role, 'reference');
+  assert.equal(frame.inputs[0]?.inputRelativePath, MOSSY);
+
+  // Убираем за собой связь: на inputAssetId стоит onDelete: Restrict, и общая
+  // очистка перед следующим тестом не смогла бы удалить клип, пока на него
+  // ссылаются. Это не обход защиты, а её признание.
+  await db.assetInput.deleteMany({ where: { assetId: frame.id } });
+  await db.asset.delete({ where: { id: frame.id } });
 });
 
 test('versioning: откат к прежним байтам виден как расхождение с диском', async () => {

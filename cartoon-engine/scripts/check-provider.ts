@@ -93,7 +93,11 @@ async function main(): Promise<void> {
 
     // --- сгенерированные ассеты ---------------------------------------------
     const assets = await listAssets(db);
-    const generated = assets.filter((asset) => asset.provenance?.producedBy === 'provider');
+    // Именно сгенерированные, а не все произведённые движком. Проверки ниже
+    // спрашивают про промпт, seed и граф — то, чем описывается запуск
+    // генеративной модели. У кадрореза ffmpeg ничего этого нет и быть не
+    // может, и требовать их от него значило бы проверять не то.
+    const generated = assets.filter((asset) => asset.provenance?.providerId === 'comfyui');
 
     check('есть хотя бы один ассет, произведённый провайдером', generated.length > 0);
 
@@ -243,6 +247,62 @@ async function main(): Promise<void> {
       assets
         .filter((asset) => ['ref-front', 'card', 'clip'].includes(asset.role ?? ''))
         .every((asset) => asset.cameraAngle === null)
+    );
+
+    // --- задний эталон -------------------------------------------------------
+    //
+    // Эталон и ракурс — разные вещи, и проверяется именно это: ref-back вырезан
+    // из клипа, а не произведён генерацией, и потому не может числиться
+    // turnaround.
+    check('роль ref-back в словаре', isAssetRole('ref-back'));
+
+    for (const asset of assets.filter((a) => a.role === 'ref-back')) {
+      const at = asset.relativePath;
+      const p = asset.provenance;
+
+      check(`задний эталон несёт ракурс back: ${at}`, asset.cameraAngle === 'back');
+      check(`задний эталон не выдаёт себя за ракурс: ${at}`, asset.role !== TURNAROUND_ROLE);
+      check(`задний эталон привязан к персонажу: ${at}`, asset.characterId !== null);
+      check(`задний эталон вырезан, а не сгенерирован: ${at}`, p?.modelKey === 'ffmpeg/cli');
+      check(`у заднего эталона нет промпта и seed: ${at}`, !p?.prompt && !p?.seed);
+      check(
+        `источник записан входом с ролью source: ${at}`,
+        asset.inputs.length === 1 && asset.inputs[0]?.role === 'source'
+      );
+      check(`номер кадра записан: ${at}`, (() => {
+        try {
+          const parsed = JSON.parse(p?.parameters ?? '{}') as { frameIndex?: unknown };
+          return Number.isInteger(parsed.frameIndex);
+        } catch {
+          return false;
+        }
+      })());
+
+      const source = assets.find((a) => a.id === asset.inputs[0]?.inputAssetId);
+      check(`источник — клип того же персонажа: ${at}`,
+        source?.role === 'clip' && source.characterId === asset.characterId);
+      check(
+        `отпечаток источника сходится с записанным: ${at}`,
+        (() => {
+          try {
+            const parsed = JSON.parse(p?.parameters ?? '{}') as { sourceSha256?: unknown };
+            return parsed.sourceSha256 === source?.sha256;
+          } catch {
+            return false;
+          }
+        })(),
+        'клип подменили после извлечения — эталон больше не доказуем'
+      );
+    }
+
+    check(
+      'у персонажа не больше одного заднего эталона',
+      (() => {
+        const byCharacter = assets
+          .filter((a) => a.role === 'ref-back')
+          .map((a) => a.characterId);
+        return new Set(byCharacter).size === byCharacter.length;
+      })()
     );
 
     // --- импортированные не притворяются произведёнными ----------------------
