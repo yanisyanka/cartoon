@@ -18,6 +18,7 @@
     "check:provider": "tsx scripts/check-provider.ts",
     "backfill:workflow": "tsx scripts/backfill-workflow-json.ts",
     "backfill:camera-angle": "tsx scripts/backfill-camera-angle.ts",
+    "apply:camera-convention": "tsx scripts/apply-object-camera-convention.ts",
     "experiment:seed": "tsx scripts/seed-stability.ts"
   },
   "dependencies": {

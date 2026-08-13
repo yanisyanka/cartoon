@@ -34,7 +34,7 @@ import type {
   RunState
 } from '../packages/core/src/provider';
 import { upsertCharacter } from '../apps/cartoon/src/repositories/characters';
-import { findAngleByCameraPhrase } from '../apps/cartoon/src/domain/turnaround';
+import { findAngleByCameraPhrase, requireAngle } from '../apps/cartoon/src/domain/turnaround';
 import { generateTurnaround } from '../apps/cartoon/src/services/turnaround-generate';
 import { createSandbox, PNG_1X1, type Sandbox } from './fixtures';
 
@@ -333,6 +333,18 @@ async function generateAll(): Promise<void> {
   }
 }
 
+test('конвенция объектная: имя называет сторону персонажа, привязка перекрёстная', () => {
+  // Решение от 13.08.2026, docs/CE-TASK-003B.md. Проверка стоит здесь именно
+  // потому, что перекрёстность выглядит опечаткой: без неё правка «очевидной
+  // ошибки» вернула бы камероцентричные имена, и зеркальную путаницу пришлось
+  // бы ловить заново глазами по картинкам.
+  assert.equal(requireAngle('three-quarter-left').cameraPhrase, '将镜头向右旋转45度');
+  assert.equal(requireAngle('three-quarter-right').cameraPhrase, '将镜头向左旋转45度');
+
+  assert.equal(findAngleByCameraPhrase('将镜头向右旋转45度')?.angle, 'three-quarter-left');
+  assert.equal(findAngleByCameraPhrase('将镜头向左旋转45度')?.angle, 'three-quarter-right');
+});
+
 test('cameraAngle: ракурс записан в строку, а не только в имя файла', async () => {
   const provider = new StubProvider();
   const result = await generateTurnaround({ store, db, provider }, RUN);
@@ -452,7 +464,10 @@ test('prompt: собран из строки персонажа и не соде
   const result = await generateTurnaround({ store, db, provider }, RUN);
 
   assert.ok(result.prompt.includes(PASSPORT.promptLine));
-  assert.ok(result.prompt.includes('将镜头向左旋转45度'));
+  // Фраза берётся из словаря, а не вписывается сюда строкой: привязку имени к
+  // фразе проверяет отдельный тест конвенции, и дублировать её здесь значило бы
+  // ронять этот тест при каждой ревизии конвенции.
+  assert.ok(result.prompt.includes(requireAngle(RUN.angle).cameraPhrase));
   assert.equal(/[а-яё]/i.test(result.prompt), false);
   assert.equal(result.prompt.includes('pure black eyes with no iris'), false);
 });
