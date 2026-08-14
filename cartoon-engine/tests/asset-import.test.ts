@@ -19,6 +19,7 @@ import {
   countAssetAliases,
   countAssets,
   createAssetWithProvenance,
+  findCurrentAssetByCharacterAndRole,
   listAssetAliases,
   listAssets,
   listCurrentAssets,
@@ -490,4 +491,261 @@ test('alias: путь настоящего ассета псевдонимом �
   );
 
   assert.equal(await countAssetAliases(db), 0);
+});
+
+/**
+ * Версия заднего эталона, порождённая движком.
+ *
+ * До CE-TASK-005A версии появлялись только от руки: человек подменял файл, а
+ * импорт описывал то, что уже лежало. Кадр, выбранный человеком, при этом мог
+ * оказаться неверным — у Твиглета выбранный кадр отстоял от затылка на 18°, — и
+ * заменить эталон было нечем. Здесь проверяется, что замена делается движком и
+ * при этом не ломает ни модель версий, ни происхождение.
+ */
+test('версия ref-back: замена байтов по пути даёт v2, а v1 остаётся историей', async () => {
+  const BACK = 'characters/09-audit/ref_back.png';
+
+  const character = await db.character.create({
+    data: {
+      slug: '09-audit',
+      number: 99,
+      name: 'Audit',
+      nameRu: 'Аудит',
+      title: 'Проверка версий',
+      promptLine: 'test spirit',
+      colorAnchors: '["#000000"]',
+      heightRatio: 1,
+      frequency: 'постоянный',
+      sourcePath: 'characters/09-audit/character.md',
+      sourceSha256: 'c'.repeat(64)
+    }
+  });
+
+  // Клип как источник. Роль важна, содержимое — нет: проверяется связь.
+  const clip = await importFile({ store, db }, MOSSY, {
+    classification: { role: 'clip', characterId: character.id }
+  });
+
+  // Посторонний ассет, которого происходящее не должно касаться.
+  await sandbox.put('characters/09-audit/card.jpg', JPEG_MINIMAL);
+  const bystander = await importFile({ store, db }, 'characters/09-audit/card.jpg', {
+    classification: { role: 'card', characterId: character.id }
+  });
+
+  const ffmpegProvenance = (frameIndex: number, sourceSha256: string) => ({
+    producedBy: 'provider' as const,
+    reproducibility: 'stochastic' as const,
+    note: 'вырезан из клипа',
+    providerId: 'ffmpeg',
+    modelKey: 'ffmpeg/cli',
+    modelVersion: '8.1.2',
+    parameters: JSON.stringify({
+      frameIndex,
+      filter: `select=eq(n,${frameIndex})`,
+      sourceRelativePath: MOSSY,
+      sourceSha256
+    })
+  });
+
+  // --- версия 1 ---------------------------------------------------------------
+  await sandbox.put(BACK, OTHER_PNG);
+  const firstFacts = await store.describe(BACK);
+  const v1 = await createAssetWithProvenance(db, {
+    relativePath: firstFacts.relativePath,
+    type: firstFacts.type,
+    mimeType: firstFacts.mimeType,
+    sizeBytes: firstFacts.sizeBytes,
+    sha256: firstFacts.sha256,
+    width: firstFacts.width,
+    height: firstFacts.height,
+    role: 'ref-back',
+    cameraAngle: 'back',
+    characterId: character.id,
+    version: 1,
+    supersedesId: null,
+    provenance: ffmpegProvenance(50, clip.asset.sha256),
+    inputs: [{ inputAssetId: clip.asset.id, role: 'source' }]
+  });
+
+  const before = await listAssets(db);
+
+  // --- версия 2: ровно то, что делает скрипт ----------------------------------
+  const current = await findCurrentAssetByCharacterAndRole(db, character.id, 'ref-back');
+  assert.ok(current);
+  assert.equal(current.id, v1.id);
+
+  const secondFacts = await store.replaceExisting(BACK, THIRD_PNG);
+  const v2 = await createAssetWithProvenance(db, {
+    relativePath: secondFacts.relativePath,
+    type: secondFacts.type,
+    mimeType: secondFacts.mimeType,
+    sizeBytes: secondFacts.sizeBytes,
+    sha256: secondFacts.sha256,
+    width: secondFacts.width,
+    height: secondFacts.height,
+    role: 'ref-back',
+    cameraAngle: 'back',
+    characterId: character.id,
+    version: current.version + 1,
+    supersedesId: current.id,
+    provenance: ffmpegProvenance(63, clip.asset.sha256),
+    inputs: [{ inputAssetId: clip.asset.id, role: 'source' }]
+  });
+
+  // --- C. связь версий --------------------------------------------------------
+  const versions = await listVersionsByPath(db, BACK);
+  assert.deepEqual(
+    versions.map((v) => v.version),
+    [1, 2]
+  );
+  assert.equal(v2.version, v1.version + 1);
+  assert.equal(v2.supersedesId, v1.id);
+  assert.equal(v2.role, 'ref-back');
+  assert.equal(v2.cameraAngle, 'back');
+  assert.notEqual(v2.sha256, v1.sha256);
+
+  // текущим считается вторая, а не та, чей путь меньше по алфавиту
+  const now = await findCurrentAssetByCharacterAndRole(db, character.id, 'ref-back');
+  assert.equal(now?.id, v2.id);
+  assert.equal(now?.version, 2);
+
+  // и текущих задних эталонов ровно один, а не два
+  const currentAssets = await listCurrentAssets(db);
+  const backs = currentAssets.filter((a) => a.role === 'ref-back');
+  assert.equal(backs.length, 1);
+  assert.equal(backs[0]?.id, v2.id);
+
+  // Тот же инвариант в той форме, в какой его проверяет check:provider —
+  // «у персонажа не больше одного ТЕКУЩЕГО заднего эталона». Перекрытая версия
+  // отличается тем, что на неё кто-то ссылается через supersedesId; считать
+  // сырые строки значило бы объявлять нарушением саму историю версий.
+  const everything = await listAssets(db);
+  const superseded = new Set(
+    everything.map((a) => a.supersedesId).filter((id): id is string => id !== null)
+  );
+  const currentBacks = everything.filter((a) => a.role === 'ref-back' && !superseded.has(a.id));
+  assert.deepEqual(currentBacks.map((a) => a.id), [v2.id]);
+  assert.equal(superseded.has(v1.id), true, 'v1 обязана числиться перекрытой');
+
+  // --- D. происхождение второй версии не беднее первой ------------------------
+  assert.equal(v2.provenance?.producedBy, 'provider');
+  assert.equal(v2.provenance?.modelKey, 'ffmpeg/cli');
+  assert.equal(v2.provenance?.providerId, 'ffmpeg');
+  const parameters = JSON.parse(v2.provenance?.parameters ?? '{}');
+  assert.equal(parameters.frameIndex, 63);
+  assert.equal(parameters.filter, 'select=eq(n,63)');
+  assert.equal(parameters.sourceSha256, clip.asset.sha256);
+  assert.equal(v2.inputs.length, 1);
+  assert.equal(v2.inputs[0]?.role, 'source');
+  assert.equal(v2.inputs[0]?.inputAssetId, clip.asset.id);
+
+  // --- E. строка v1 не изменилась ни в одном поле -----------------------------
+  const v1After = versions[0];
+  assert.equal(v1After?.id, v1.id);
+  assert.equal(v1After?.version, 1);
+  assert.equal(v1After?.supersedesId, null);
+  assert.equal(v1After?.sha256, v1.sha256);
+  assert.equal(v1After?.role, 'ref-back');
+  assert.equal(v1After?.createdAt, v1.createdAt);
+
+  // Её отпечаток намеренно РАСХОДИТСЯ с диском: по пути теперь лежат байты v2.
+  // Это и есть состояние перекрытой версии, а не порча реестра.
+  assert.notEqual(v1After?.sha256, (await store.describe(BACK)).sha256);
+  assert.equal((await store.describe(BACK)).sha256, v2.sha256);
+
+  // Байты v1 восстановимы: их отпечаток известен и записан.
+  assert.equal(createHash('sha256').update(OTHER_PNG).digest('hex'), v1.sha256);
+
+  // --- F. остальные ассеты не тронуты -----------------------------------------
+  const after = await listAssets(db);
+  assert.equal(after.length, before.length + 1);
+  for (const old of before) {
+    const now2 = after.find((a) => a.id === old.id);
+    assert.ok(now2, `ассет ${old.relativePath} исчез`);
+    assert.equal(now2.sha256, old.sha256);
+    assert.equal(now2.version, old.version);
+    assert.equal(now2.supersedesId, old.supersedesId);
+    assert.equal(now2.role, old.role);
+  }
+  assert.equal(
+    (await store.describe('characters/09-audit/card.jpg')).sha256,
+    bystander.asset.sha256
+  );
+
+  // Прибираем: на inputAssetId стоит onDelete: Restrict, общая очистка перед
+  // следующим тестом не снесла бы клип, пока на него ссылаются.
+  await db.assetInput.deleteMany({ where: { assetId: { in: [v1.id, v2.id] } } });
+  await db.asset.delete({ where: { id: v2.id } });
+  await db.asset.delete({ where: { id: v1.id } });
+  await db.character.delete({ where: { id: character.id } });
+});
+
+test('версия ref-back: замена не создаёт второго текущего эталона по новому пути', async () => {
+  // Страховка от соблазна «положить рядом»: если новая версия ляжет на другой
+  // путь, текущим станет тот, чей путь меньше по алфавиту, то есть устаревший.
+  assert.ok(
+    'characters/03-twiglet/ref_back.png' < 'characters/03-twiglet/ref_back.v2.png',
+    'порядок путей изменился — проверка ниже потеряла смысл'
+  );
+
+  const character = await db.character.create({
+    data: {
+      slug: '08-paths',
+      number: 98,
+      name: 'Paths',
+      nameRu: 'Пути',
+      title: 'Проверка путей',
+      promptLine: 'test spirit',
+      colorAnchors: '["#000000"]',
+      heightRatio: 1,
+      frequency: 'постоянный',
+      sourcePath: 'characters/08-paths/character.md',
+      sourceSha256: 'd'.repeat(64)
+    }
+  });
+
+  const base = 'characters/08-paths/ref_back.png';
+  const beside = 'characters/08-paths/ref_back.v2.png';
+  await sandbox.put(base, OTHER_PNG);
+  await sandbox.put(beside, THIRD_PNG);
+
+  const mk = async (relativePath: string, version: number, supersedesId: string | null) => {
+    const facts = await store.describe(relativePath);
+    return createAssetWithProvenance(db, {
+      relativePath: facts.relativePath,
+      type: facts.type,
+      mimeType: facts.mimeType,
+      sizeBytes: facts.sizeBytes,
+      sha256: facts.sha256,
+      width: facts.width,
+      height: facts.height,
+      role: 'ref-back',
+      cameraAngle: 'back',
+      characterId: character.id,
+      version,
+      supersedesId,
+      provenance: {
+        producedBy: 'provider',
+        reproducibility: 'stochastic',
+        note: 'проверка путей',
+        modelKey: 'ffmpeg/cli'
+      },
+      inputs: []
+    });
+  };
+
+  const v1 = await mk(base, 1, null);
+  const v2beside = await mk(beside, 2, v1.id);
+
+  // Версия по СОСЕДНЕМУ пути формально верна, но реестр после неё врёт:
+  const current = await findCurrentAssetByCharacterAndRole(db, character.id, 'ref-back');
+  assert.equal(current?.id, v1.id, 'вернулась бы устаревшая версия — путь меньше по алфавиту');
+  assert.equal(current?.version, 1);
+
+  const backs = (await listCurrentAssets(db)).filter((a) => a.role === 'ref-back');
+  assert.equal(backs.length, 2, 'у персонажа оказалось два текущих задних эталона');
+
+  await db.asset.delete({ where: { id: v2beside.id } });
+  await db.asset.delete({ where: { id: v1.id } });
+  await db.character.delete({ where: { id: character.id } });
 });

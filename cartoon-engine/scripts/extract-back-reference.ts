@@ -19,10 +19,17 @@
  * намеренно: «настоящие 180°» — суждение о картинке, и принимать его должен
  * тот, кто на неё смотрит.
  *
+ * Повторный запуск заменяет эталон, а не дополняет его. Суждение о 180° человек
+ * может пересмотреть — так и вышло с Твиглетом, у которого выбранный кадр
+ * оказался в 18° от затылка, — и тогда нужна версия, а не второй эталон рядом.
+ * Новые байты ложатся на путь предыдущей версии через `replaceExisting`, строка
+ * предыдущей остаётся в реестре нетронутой и связывается через `supersedesId`.
+ *
  *   npm run extract:back-ref -- <slug> --frame <N>
  */
 import 'dotenv/config';
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
 import {
   assertValidProvenance,
@@ -141,18 +148,47 @@ async function main(): Promise<void> {
       );
     }
 
-    // --- 3. путь результата: новый, никогда не поверх существующего ---------
+    // --- 3. путь результата: тот же, что у предыдущей версии ----------------
+    // Версия в этой модели — тот же путь и другие байты, а «текущий эталон»
+    // ищется группировкой по пути. Положить новую версию рядом означало бы
+    // завести у персонажа два текущих задних эталона, из которых запрос вернул
+    // бы тот, чей путь меньше по алфавиту, то есть устаревший.
     const outputPath = `characters/${character.slug}/ref_back.png`;
-    if (await store.exists(outputPath)) {
+    const current = await findCurrentAssetByCharacterAndRole(
+      db,
+      character.id,
+      BACK_REFERENCE_ROLE
+    );
+
+    if (current && current.relativePath !== outputPath) {
       throw new InvariantError(
-        `${outputPath} уже существует. Задний эталон переписывать нельзя: ` +
-          'на него ссылаются как на источник.'
+        `Текущий задний эталон записан по пути ${current.relativePath}, ` +
+          `а не ${outputPath}. Новая версия обязана лечь на путь предыдущей.`
+      );
+    }
+    if (!current && (await store.exists(outputPath))) {
+      throw new InvariantError(
+        `${outputPath} лежит на диске, но в реестре его нет. ` +
+          'Сначала разберите расхождение, потом заменяйте.'
       );
     }
 
     // --- 4. извлечение -------------------------------------------------------
     const bytes = await extractFrame(store.resolve(clip.relativePath), frameIndex);
-    const facts = await store.receive(outputPath, bytes);
+
+    // Тот же кадр заменять нечем: отпечаток уникален глобально, и попытка
+    // записать существующие байты второй строкой всё равно уперлась бы в базу —
+    // лучше сказать это словами, чем нарушением ограничения.
+    if (current && createHash('sha256').update(bytes).digest('hex') === current.sha256) {
+      throw new InvariantError(
+        `Кадр ${frameIndex} уже является текущим задним эталоном ` +
+          `(версия ${current.version}, ${current.sha256}). Заменять нечем.`
+      );
+    }
+
+    const facts = current
+      ? await store.replaceExisting(outputPath, bytes)
+      : await store.receive(outputPath, bytes);
 
     // --- 5. происхождение ----------------------------------------------------
     const parameters = {
@@ -221,8 +257,11 @@ async function main(): Promise<void> {
       // знает `back`, и заводить для эталона отдельное понятие не нужно.
       cameraAngle: 'back',
       characterId: character.id,
-      version: 1,
-      supersedesId: null,
+      // Прежняя строка не трогается: она остаётся историей и по-прежнему
+      // описывает те байты, которыми была. Расхождение её отпечатка с диском
+      // после замены — не порча, а обычное состояние перекрытой версии.
+      version: current ? current.version + 1 : 1,
+      supersedesId: current?.id ?? null,
       provenance,
       inputs: [{ inputAssetId: clip.id, role: SOURCE_INPUT_ROLE }]
     });
@@ -232,6 +271,10 @@ async function main(): Promise<void> {
     console.log(`  кадр     ${asset.width}×${asset.height} · ${asset.sizeBytes} байт`);
     console.log(`  sha256   ${asset.sha256}`);
     console.log(`  версия   ${asset.version} · supersedes ${asset.supersedesId ?? 'null'}`);
+    if (current) {
+      console.log(`  заменил  версию ${current.version} (${current.id}), её строка не изменена`);
+      console.log(`           её отпечаток ${current.sha256} остаётся в реестре как история`);
+    }
     console.log(`  из       ${clip.relativePath} (роль ${SOURCE_INPUT_ROLE})`);
     console.log(`  класс    ${asset.provenance?.reproducibility}`);
     console.log(`  причина  ${asset.provenance?.note}`);

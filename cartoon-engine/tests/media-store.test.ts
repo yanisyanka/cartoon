@@ -5,6 +5,7 @@ import {
   MediaContentError,
   MediaNotFoundError,
   MediaPathError,
+  MediaWriteError,
   NotConfiguredError
 } from '../packages/core/src/errors';
 import {
@@ -180,4 +181,78 @@ test('config: относительный корень не принимаетс�
 test('config: пустой MEDIA_ROOT даёт понятный отказ', () => {
   assert.throws(() => MediaStore.fromEnv({}), NotConfiguredError);
   assert.throws(() => MediaStore.fromEnv({ MEDIA_ROOT: '   ' }), NotConfiguredError);
+});
+
+/** Другой валидный PNG: та же сигнатура, другое содержимое. */
+const OTHER_PNG = Buffer.concat([
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+  JPEG_MINIMAL
+]);
+
+test('receive: новый путь принимается', async () => {
+  const facts = await store.receive('characters/09-write/fresh.png', PNG_1X1);
+
+  assert.equal(facts.sha256, PNG_1X1_SHA256);
+  assert.equal(facts.sizeBytes, PNG_1X1_BYTES);
+});
+
+test('receive: поверх существующего файла не пишет НИКОГДА', async () => {
+  const target = 'characters/09-write/taken.png';
+  await store.receive(target, PNG_1X1);
+
+  await assert.rejects(() => store.receive(target, OTHER_PNG), MediaWriteError);
+
+  // Отказ не должен был ничего задеть: на месте прежние байты.
+  const after = await store.describe(target);
+  assert.equal(after.sha256, PNG_1X1_SHA256);
+});
+
+test('replaceExisting: заменяет байты по известному пути', async () => {
+  const target = 'characters/09-replace/ref_back.png';
+  const before = await store.receive(target, PNG_1X1);
+  assert.equal(before.sha256, PNG_1X1_SHA256);
+
+  const after = await store.replaceExisting(target, OTHER_PNG);
+
+  // Путь тот же, байты другие — это и есть версия в этой модели.
+  assert.equal(after.relativePath, before.relativePath);
+  assert.notEqual(after.sha256, before.sha256);
+  assert.equal(after.sizeBytes, OTHER_PNG.length);
+
+  // Отпечаток посчитан по диску, а не по намерению.
+  const reread = await store.describe(target);
+  assert.equal(reread.sha256, after.sha256);
+});
+
+test('replaceExisting: по отсутствующему пути отказывает и файла не создаёт', async () => {
+  const missing = 'characters/09-replace/never-was.png';
+
+  await assert.rejects(() => store.replaceExisting(missing, PNG_1X1), MediaWriteError);
+  assert.equal(await store.exists(missing), false);
+});
+
+test('replaceExisting: временных хвостов после себя не оставляет', async () => {
+  const target = 'characters/09-replace/tidy.png';
+  await store.receive(target, PNG_1X1);
+  await store.replaceExisting(target, OTHER_PNG);
+
+  const leftovers = await store.findAll('characters/09-replace');
+  assert.deepEqual(
+    leftovers.filter((entry) => entry.includes('.replacing-')),
+    []
+  );
+});
+
+test('replaceExisting: не ослабляет защиту receive для соседних файлов', async () => {
+  const neighbour = 'characters/09-replace/neighbour.png';
+  await store.receive(neighbour, PNG_1X1);
+  await store.replaceExisting('characters/09-replace/ref_back.png', PNG_1X1);
+
+  // Замена одного пути не сделала записываемыми остальные.
+  await assert.rejects(() => store.receive(neighbour, OTHER_PNG), MediaWriteError);
+  assert.equal((await store.describe(neighbour)).sha256, PNG_1X1_SHA256);
+});
+
+test('replaceExisting: границы корня действуют и здесь', async () => {
+  await assert.rejects(() => store.replaceExisting('../outside.png', PNG_1X1), MediaPathError);
 });
