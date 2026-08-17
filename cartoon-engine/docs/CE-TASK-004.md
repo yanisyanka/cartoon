@@ -499,18 +499,31 @@ back                 seed 20260815  5ca7bf90…   канону соответс�
 3. Решить, нужен ли апскейл задних эталонов до генерации.
 4. Проверить, помогает ли `ref-back` получить сильный ¾ слева, — это была
    исходная причина всей работы.
-5. Запушить три локальных коммита: `e406e3b`, `d1ba923`, `95dec72`.
+5. Перед push сверить актуальное состояние — `git log` и
+   `git rev-list --left-right --count origin/main...HEAD`, — и запушить
+   накопившиеся локальные коммиты. Делать это после финального аудита.
 
 ## Коммиты
 
 ```
-95dec72  feat: version canonical back references in place  (не запушен)
-d1ba923  docs: finalize back reference pipeline            (не запушен)
-e406e3b  feat: add canonical back reference extraction     (не запушен)
+95dec72  feat: version canonical back references in place
+d1ba923  docs: finalize back reference pipeline
+e406e3b  feat: add canonical back reference extraction
+-------  граница origin/main, выше — только локальное
 f2cab31  fix: align turnaround angles with object convention
 0515800  feat: make turnaround camera angle a first-class Asset field
 f0156c8  fix: measure Qwen seed stability and document CE-TASK-003B
 ```
+
+Последний коммит, известный `origin/main`, — `f2cab31`. Всё, что выше границы,
+существует только локально; поверх перечисленных трёх лежат ещё коммиты
+документационной сверки — аудит CE-TASK-005 правил этот документ несколько раз,
+и его правки закоммичены. **Push не выполнялся.**
+
+Число накопившихся локальных коммитов здесь намеренно не названо: блок живёт в
+том же документе, который эти коммиты и правят, поэтому любая записанная цифра
+устаревает в момент собственного коммита. Актуальное состояние даёт
+`git rev-list --left-right --count origin/main...HEAD`.
 
 После `e406e3b` появились десять эталонов, висячая запись и **две версии
 заднего эталона** — Твиглет `v2` и Глиммер `v2`. В git всё это не отражено:
@@ -520,5 +533,6 @@ f0156c8  fix: measure Qwen seed stability and document CE-TASK-003B
 только связкой «файлы на диске + `engine.db`», и ни того, ни другого git не
 хранит.
 
-Коммиты `95dec72` (механизм версий) и `d1ba923` (документация) в репозитории
-есть, но **не запушены** — как и `e406e3b`.
+Что именно в трёх перечисленных: `e406e3b` завёл извлечение эталонов, `d1ba923`
+задокументировал пайплайн, `95dec72` добавил механизм версий. Ни один из них —
+как и все документационные коммиты поверх — в `origin/main` не ушёл.
